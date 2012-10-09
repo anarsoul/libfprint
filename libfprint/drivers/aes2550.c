@@ -53,15 +53,12 @@ static void complete_deactivation(struct fp_img_dev *dev);
 #define FRAME_WIDTH		192
 #define FRAME_HEIGHT		8
 #define FRAME_SIZE		(FRAME_WIDTH * FRAME_HEIGHT)
-/* maximum number of frames to read during a scan */
-#define MAX_FRAMES		150
 
 /* E-data msg */
 #define STRIP_SIZE		(0x31e + 3)
+#define HEARTBEAT_SIZE		(4 + 3)
 
 struct aes2550_dev {
-	unsigned char data_buf[STRIP_SIZE];
-	int data_len;
 	GSList *strips;
 	size_t strips_len;
 	gboolean deactivating;
@@ -191,7 +188,6 @@ static unsigned char finger_det_reqs[] = {
 	0xbe, 0x00,
 	0xcf, 0x01,
 	0xdd, 0x00,
-	0xac, 0x01, /* Errata */
 	0x70, 0x00, 0x01, 0x00, /* Heart beat off */
 	0x01,
 };
@@ -297,7 +293,7 @@ static void start_finger_detection(struct fp_img_dev *dev)
 static unsigned char capture_reqs[] = {
 	0x80, 0x01,
 	0x80, 0x18,
-	0x85, 0x00,
+	0x85, 0x80,
 	0x8f, 0x0c,
 	0x9c, 0xbf,
 	0x9d, 0x46,
@@ -309,7 +305,6 @@ static unsigned char capture_reqs[] = {
 	0xcf, 0x32,
 	0xdc, 0x01,
 	0xdd, 0x00,
-	0xac, 0x01, /* Errata */
 	0x70, 0x00, 0x01, 0x03, /* Heart beat cmd, 3 * 16 cycles without sending image */
 	0x02,
 };
@@ -328,35 +323,22 @@ enum capture_states {
 };
 
 /* Returns number of processed bytes */
-static int process_strip_data(struct fpi_ssm *ssm, unsigned char *data, int buf_size, int *last_found)
+static int process_strip_data(struct fpi_ssm *ssm, unsigned char *data)
 {
 	unsigned char *stripdata;
 	struct fp_img_dev *dev = ssm->priv;
 	struct aes2550_dev *aesdev = dev->priv;
-	int len, total_len = 0;
+	int len;
 
 	/* FIXME: remove magic constants */
-	switch (data[0]) {
-	case 0xe0:
-		break;
-	case 0xdb:
-		/* Finger was removed */
-		/* assemble image and submit it to library */
-		fp_dbg("Got heartbeat => last frame");
-		*last_found = 1;
-		fpi_ssm_next_state(ssm);
-		goto out;
-		break;
-	default:
-		fp_dbg("Invalid magic: %.2x\n", (int)data[0]);
-		return -EINVAL;
-		break;
+	if (data[0] != 0xe0) {
+		fp_dbg("Bogus magic: %.2x\n", (int)(data[0]));
+		return -EPROTO;
 	}
-
-	if (buf_size < STRIP_SIZE)
-		return 0;
-
 	len = data[1] * 256 + data[2];
+	if (len != (STRIP_SIZE - 3)) {
+		fp_dbg("Bogus frame len: %.4x\n", len);
+	}
 	stripdata = g_malloc(FRAME_WIDTH * FRAME_HEIGHT / 2); /* 4 bits per pixel */
 	if (!stripdata) {
 		fpi_ssm_mark_aborted(ssm, -ENOMEM);
@@ -366,10 +348,7 @@ static int process_strip_data(struct fpi_ssm *ssm, unsigned char *data, int buf_
 	aesdev->strips = g_slist_prepend(aesdev->strips, stripdata);
 	aesdev->strips_len++;
 
-	total_len += (len + 3);
-	data += (len + 3);
-out:
-	return total_len;
+	return 0;
 }
 
 static void capture_reqs_cb(struct libusb_transfer *transfer)
@@ -405,55 +384,37 @@ static void capture_set_idle_reqs_cb(struct libusb_transfer *transfer)
 static void capture_read_data_cb(struct libusb_transfer *transfer)
 {
 	struct fpi_ssm *ssm = transfer->user_data;
-	struct fp_img_dev *dev = ssm->priv;
-	struct aes2550_dev *aesdev = dev->priv;
-	unsigned char *data = NULL;
-	int len = transfer->actual_length, processed = 0, last_found = 0;
+	unsigned char *data = transfer->buffer;
+	int r;
 
 	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
-		fp_dbg("status not completed, %d", transfer->status);
+		fp_dbg("request is not completed, %d", transfer->status);
 		fpi_ssm_mark_aborted(ssm, -EIO);
 		goto out;
 	}
-	if (transfer->actual_length != transfer->length) {
-		fp_dbg("Short frame, appear to be a last one?");
-	}
 
-	data = transfer->buffer;
-
-	if (aesdev->data_len) {
-		processed = MIN(STRIP_SIZE - aesdev->data_len, transfer->actual_length);
-		memcpy(aesdev->data_buf + aesdev->data_len, data, processed);
-		aesdev->data_len += processed;
-		len -= processed;
-		data += processed;
-	}
-
-	if (aesdev->data_len == STRIP_SIZE) {
-		fp_dbg("Processing rest from last transfer");
-		process_strip_data(ssm, data, aesdev->data_len, &last_found);
-		aesdev->data_len = 0;
-	}
-
-	while (len && !last_found) {
-		processed = process_strip_data(ssm, data, len, &last_found);
-		fp_dbg("Processed frame, result %d\n", processed);
-		if (!processed)
+	switch (transfer->actual_length) {
+		case STRIP_SIZE:
+			r = process_strip_data(ssm, data);
+			if (r < 0) {
+				fp_dbg("Processing strip data failed: %d", r);
+				fpi_ssm_mark_aborted(ssm, -EPROTO);
+				goto out;
+			}
+			fpi_ssm_jump_to_state(ssm, CAPTURE_READ_DATA);
 			break;
-		if (processed < 0) {
-			fpi_ssm_mark_aborted(ssm, processed);
-			goto out;
-		}
-		data += processed;
-		len -= processed;
-	}
-
-	if (!last_found) {
-		fpi_ssm_jump_to_state(ssm, CAPTURE_READ_DATA);
-		if (len) {
-			memcpy(aesdev->data_buf, data, len);
-			aesdev->data_len = len;
-		}
+		case HEARTBEAT_SIZE:
+			if (data[0] == 0xdb) {
+				/* No data for a long time, looks like finger was removed (or no movement) */
+				/* assemble image and submit it to library */
+				fp_dbg("Got heartbeat => last frame");
+				fpi_ssm_next_state(ssm);
+			}
+			break;
+		default:
+			fp_dbg("Short frame %d, skip", transfer->actual_length);
+			fpi_ssm_jump_to_state(ssm, CAPTURE_READ_DATA);
+			break;
 	}
 out:
 	g_free(transfer->buffer);
@@ -721,11 +682,9 @@ static void activate_sm_complete(struct fpi_ssm *ssm)
 
 static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
 {
-	struct aes2550_dev *aesdev = dev->priv;
 	struct fpi_ssm *ssm = fpi_ssm_new(dev->dev, activate_run_state,
 		ACTIVATE_NUM_STATES);
 	ssm->priv = dev;
-	aesdev->data_len = 0;
 	fpi_ssm_start(ssm, activate_sm_complete);
 	return 0;
 }
