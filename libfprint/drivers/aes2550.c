@@ -203,9 +203,11 @@ static void finger_det_data_cb(struct libusb_transfer *transfer)
 	unsigned char *data = transfer->buffer;
 
 	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+		fp_dbg("data transfer status %d\n", transfer->status);
 		fpi_imgdev_session_error(dev, -EIO);
 		goto out;
 	} else if (transfer->length != transfer->actual_length) {
+		fp_dbg("expected %d, got %d bytes", transfer->length, transfer->actual_length);
 		fpi_imgdev_session_error(dev, -EPROTO);
 		goto out;
 	}
@@ -232,10 +234,12 @@ static void finger_det_reqs_cb(struct libusb_transfer *t)
 	struct fp_img_dev *dev = t->user_data;
 
 	if (t->status != LIBUSB_TRANSFER_COMPLETED) {
+		fp_dbg("req transfer status %d\n", t->status);
 		fpi_imgdev_session_error(dev, -EIO);
 		goto exit_free_transfer;
 	} else if (t->length != t->actual_length) {
-		fpi_imgdev_session_error(dev, -EIO);
+		fp_dbg("expected %d, got %d bytes", t->length, t->actual_length);
+		fpi_imgdev_session_error(dev, -EPROTO);
 		goto exit_free_transfer;
 	}
 
