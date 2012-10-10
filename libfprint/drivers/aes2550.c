@@ -30,6 +30,7 @@
 
 #include <aeslib.h>
 #include <fp_internal.h>
+#include "aes2550.h"
 
 static void start_capture(struct fp_img_dev *dev);
 static void complete_deactivation(struct fp_img_dev *dev);
@@ -53,10 +54,6 @@ static void complete_deactivation(struct fp_img_dev *dev);
 #define FRAME_WIDTH		192
 #define FRAME_HEIGHT		8
 #define FRAME_SIZE		(FRAME_WIDTH * FRAME_HEIGHT)
-
-/* E-data msg */
-#define STRIP_SIZE		(0x31e + 3)
-#define HEARTBEAT_SIZE		(4 + 3)
 
 struct aes2550_dev {
 	GSList *strips;
@@ -178,19 +175,15 @@ static void assemble_and_submit_image(struct fp_img_dev *dev)
 
 /****** FINGER PRESENCE DETECTION ******/
 
-/* FIXME: remove magic constants */
 static unsigned char finger_det_reqs[] = {
-	0x80, 0x01,
-	0x95, 0x18,
-	0xa1, 0x00,
-	0x8a, 0x07,
+	0x80, AES2550_REG80_MASTER_RESET,
+	0x95, (8 << AES2550_REG95_COL_SCANNED_OFS) | (1 << AES2550_REG95_EPIX_AVG_OFS),
 	0xad, 0x00,
-	0xbd, 0x00,
-	0xbe, 0x00,
-	0xcf, 0x01,
-	0xdd, 0x00,
-	0x70, 0x00, 0x01, 0x00, /* Heart beat off */
-	0x01,
+	0xbd, (0 << AES2550_REGBD_LPO_IN_15_8_OFS),
+	0xbe, (0 << AES2550_REGBE_LPO_IN_7_0_OFS),
+	0xcf, AES2550_REGCF_INTERFERENCE_CHK_EN,
+	AES2550_CMD_HEARTBEAT, 0x00, 0x01, 0x00, /* Heart beat off */
+	AES2550_CMD_RUN_FD,
 };
 
 static void start_finger_detection(struct fp_img_dev *dev);
@@ -209,8 +202,8 @@ static void finger_det_data_cb(struct libusb_transfer *transfer)
 	fp_dbg("transfer completed, len: %.4x, data: %.2x %.2x",
 		transfer->actual_length, (int)data[0], (int)data[1]);
 
-	/* FIXME: remove magic constants */
-	if ((transfer->actual_length >= 2) && (data[0] == 0x83) && (data[1] & 0x80)) {
+	/* Check if we got 2 bytes, reg address 0x83 and its value */
+	if ((transfer->actual_length >= 2) && (data[0] == 0x83) && (data[1] & AES2550_REG83_FINGER_PRESENT)) {
 		/* finger present, start capturing */
 		fpi_imgdev_report_finger_status(dev, TRUE);
 		start_capture(dev);
@@ -289,30 +282,22 @@ static void start_finger_detection(struct fp_img_dev *dev)
 
 /****** CAPTURE ******/
 
-/* FIXME: remove magic constants */
 static unsigned char capture_reqs[] = {
-	0x80, 0x01,
-	0x80, 0x18,
-	0x85, 0x80,
-	0x8f, 0x0c,
-	0x9c, 0xbf,
-	0x9d, 0x46,
-	0x9e, 0x71,
-	0x9f, 0x23,
-	0xa2, 0x00,
-	0xb1, 0x00,
-	0xbf, 0x0b,
-	0xcf, 0x32,
-	0xdc, 0x01,
-	0xdd, 0x00,
-	0x70, 0x00, 0x01, 0x03, /* Heart beat cmd, 3 * 16 cycles without sending image */
-	0x02,
+	0x80, AES2550_REG80_MASTER_RESET,
+	0x80, (1 << AES2550_REG80_SENSOR_MODE_OFS) | (AES2550_REG80_HGC_ENABLE),
+	0x85, AES2550_REG85_FLUSH_PER_FRAME,
+	0x8f, AES2550_REG8F_AUTH_DISABLE | AES2550_REG8F_EHISTO_DISABLE,
+	0xbf, AES2550_REGBF_RSR_DIR_UPDOWN_MOTION | AES2550_REGBF_RSR_LEVEL_SUPER_RSR,
+	0xcf, (3 << AES2550_REGCF_INTERFERENCE_AVG_OFFS) | AES2550_REGCF_INTERFERENCE_AVG_EN,
+	0xdc, (1 << AES2550_REGDC_BP_NUM_REF_SWEEP_OFS),
+	AES2550_CMD_HEARTBEAT, 0x00, 0x01, 0x03, /* Heart beat cmd, 3 * 16 cycles without sending image */
+	AES2550_CMD_GET_ENROLL_IMG,
 };
 
 static unsigned char capture_set_idle_reqs[] = {
-	0x80, 0x01,
-	0x70, 0x00, 0x01, 0x00, /* Heart beat off */
-	0x00,
+	0x80, AES2550_REG80_MASTER_RESET,
+	AES2550_CMD_HEARTBEAT, 0x00, 0x01, 0x00, /* Heart beat off */
+	AES2550_CMD_SET_IDLE_MODE,
 };
 
 enum capture_states {
@@ -330,13 +315,12 @@ static int process_strip_data(struct fpi_ssm *ssm, unsigned char *data)
 	struct aes2550_dev *aesdev = dev->priv;
 	int len;
 
-	/* FIXME: remove magic constants */
-	if (data[0] != 0xe0) {
+	if (data[0] != AES2550_EDATA_MAGIC) {
 		fp_dbg("Bogus magic: %.2x\n", (int)(data[0]));
 		return -EPROTO;
 	}
 	len = data[1] * 256 + data[2];
-	if (len != (STRIP_SIZE - 3)) {
+	if (len != (AES2550_STRIP_SIZE - 3)) {
 		fp_dbg("Bogus frame len: %.4x\n", len);
 	}
 	stripdata = g_malloc(FRAME_WIDTH * FRAME_HEIGHT / 2); /* 4 bits per pixel */
@@ -398,7 +382,7 @@ static void capture_read_data_cb(struct libusb_transfer *transfer)
 		fp_dbg("data: %.2x %.2x", (int)data[0], (int)data[1]);
 
 	switch (transfer->actual_length) {
-		case STRIP_SIZE:
+		case AES2550_STRIP_SIZE:
 			r = process_strip_data(ssm, data);
 			if (r < 0) {
 				fp_dbg("Processing strip data failed: %d", r);
@@ -407,8 +391,8 @@ static void capture_read_data_cb(struct libusb_transfer *transfer)
 			}
 			fpi_ssm_jump_to_state(ssm, CAPTURE_READ_DATA);
 			break;
-		case HEARTBEAT_SIZE:
-			if (data[0] == 0xdb) {
+		case AES2550_HEARTBEAT_SIZE:
+			if (data[0] == AES2550_HEARTBEAT_MAGIC) {
 				/* No data for a long time, looks like finger was removed (or no movement) */
 				/* assemble image and submit it to library */
 				fp_dbg("Got heartbeat => last frame");
@@ -521,23 +505,18 @@ static void start_capture(struct fp_img_dev *dev)
 
 /****** INITIALIZATION/DEINITIALIZATION ******/
 
-/* FIXME: remove magic constants */
 static unsigned char init_reqs[] = {
-	0x80, 0x01, /* Master reset */
-	0xa1, 0x00,
-	0x80, 0x12,
-	0x85, 0x80,
-	0xa8, 0x10,
-	0xb1, 0x20,
-	0x81, 0x04,
+	0x80, AES2550_REG80_MASTER_RESET, /* Master reset */
+	0x80, (1 << AES2550_REG80_SENSOR_MODE_OFS) | (AES2550_REG80_FORCE_FINGER_PRESENT),
+	0x85, AES2550_REG85_FLUSH_PER_FRAME,
+	0xa8, AES2550_REGA8_DIG_BIT_EN,
+	0x81, AES2550_REG81_NSHOT,
 };
 
-/* FIXME: remove magic constants */
 static unsigned char calibrate_reqs[] = {
-	0x80, 0x01, /* Master reset */
-	0xdd, 0x00, /* Debug Off */
-	0x06, /* Run calibration */
-	0x10, /* Read calibration table */
+	0x80, AES2550_REG80_MASTER_RESET, /* Master reset */
+	AES2550_CMD_CALIBRATE,
+	AES2550_CMD_READ_CALIBRATION_DATA,
 };
 
 enum activate_states {
