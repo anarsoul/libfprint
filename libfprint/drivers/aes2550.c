@@ -172,6 +172,7 @@ static void assemble_and_submit_image(struct fp_img_dev *dev)
 	g_slist_foreach(aesdev->strips, (GFunc) g_free, NULL);
 	g_slist_free(aesdev->strips);
 	aesdev->strips = NULL;
+	aesdev->strips_len = 0;
 }
 
 
@@ -203,14 +204,13 @@ static void finger_det_data_cb(struct libusb_transfer *transfer)
 		fp_dbg("data transfer status %d\n", transfer->status);
 		fpi_imgdev_session_error(dev, -EIO);
 		goto out;
-	} else if (transfer->length != transfer->actual_length) {
-		fp_dbg("expected %d, got %d bytes", transfer->length, transfer->actual_length);
-		fpi_imgdev_session_error(dev, -EPROTO);
-		goto out;
 	}
 
+	fp_dbg("transfer completed, len: %.4x, data: %.2x %.2x",
+		transfer->actual_length, (int)data[0], (int)data[1]);
+
 	/* FIXME: remove magic constants */
-	if (data[1] & 0x80) {
+	if ((transfer->actual_length >= 2) && (data[0] == 0x83) && (data[1] & 0x80)) {
 		/* finger present, start capturing */
 		fpi_imgdev_report_finger_status(dev, TRUE);
 		start_capture(dev);
@@ -247,8 +247,8 @@ static void finger_det_reqs_cb(struct libusb_transfer *t)
 	}
 
 	/* 2 bytes of result */
-	data = g_malloc(2);
-	libusb_fill_bulk_transfer(transfer, dev->udev, EP_IN, data, 2,
+	data = g_malloc(8192);
+	libusb_fill_bulk_transfer(transfer, dev->udev, EP_IN, data, 8192,
 		finger_det_data_cb, dev, BULK_TIMEOUT);
 
 	r = libusb_submit_transfer(transfer);
@@ -392,6 +392,10 @@ static void capture_read_data_cb(struct libusb_transfer *transfer)
 		fpi_ssm_mark_aborted(ssm, -EIO);
 		goto out;
 	}
+
+	fp_dbg("request completed, len: %.4x", transfer->actual_length);
+	if (transfer->actual_length >= 2)
+		fp_dbg("data: %.2x %.2x", (int)data[0], (int)data[1]);
 
 	switch (transfer->actual_length) {
 		case STRIP_SIZE:
