@@ -2,7 +2,7 @@
  * AuthenTec AES2550/AES2810 driver for libfprint
  * Copyright (C) 2007-2008 Daniel Drake <dsd@gentoo.org>
  * Copyright (C) 2007 Cyrille Bagard
- * Copyright (C) 2007-2012 Vasily Khoruzhick
+ * Copyright (C) 2007-2012 Vasily Khoruzhick <anarsoul@gmail.com>
  *
  * Based on AES2501 driver
  *
