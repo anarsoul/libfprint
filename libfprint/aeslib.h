@@ -36,9 +36,15 @@ void aes_write_regv(struct fp_img_dev *dev, const struct aes_regwrite *regs,
 void aes_assemble_image(unsigned char *input, size_t width, size_t height,
 	unsigned char *output);
 
+enum {
+	ASSEMBLE_USE_ERRORS_SUM,
+	ASSEMBLE_USE_IMAGE_HEIGHT,
+};
+
 void aes_assemble_and_submit_image(struct fp_img_dev *dev,
 	GSList *stripes, size_t stripes_len,
-	unsigned int frame_width, unsigned int frame_height);
+	unsigned int frame_width, unsigned int frame_height,
+	int reverse_detection_method);
 
 #endif
 

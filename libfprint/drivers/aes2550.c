@@ -249,7 +249,8 @@ static void capture_set_idle_reqs_cb(struct libusb_transfer *transfer)
 		(transfer->length == transfer->actual_length)) {
 		aesdev->strips = g_slist_reverse(aesdev->strips);
 		aes_assemble_and_submit_image(dev, aesdev->strips,
-			aesdev->strips_len, FRAME_WIDTH, FRAME_HEIGHT);
+			aesdev->strips_len, FRAME_WIDTH, FRAME_HEIGHT,
+			ASSEMBLE_USE_ERRORS_SUM);
 		g_slist_foreach(aesdev->strips, (GFunc) g_free, NULL);
 		g_slist_free(aesdev->strips);
 		aesdev->strips = NULL;

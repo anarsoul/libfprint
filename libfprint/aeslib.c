@@ -246,12 +246,14 @@ static unsigned int assemble(GSList *list_entry, size_t num_stripes,
 
 void aes_assemble_and_submit_image(struct fp_img_dev *dev,
 	GSList *stripes, size_t stripes_len,
-	unsigned int frame_width, unsigned int frame_height)
+	unsigned int frame_width, unsigned int frame_height,
+	int reverse_detection_method)
 {
 	size_t final_size;
 	struct fp_img *img;
 	unsigned int frame_size = frame_width * frame_height;
 	unsigned int errors_sum, r_errors_sum;
+	unsigned int img_height;
 
 	BUG_ON(stripes_len == 0);
 
@@ -259,21 +261,35 @@ void aes_assemble_and_submit_image(struct fp_img_dev *dev,
 	img = fpi_img_new(stripes_len * frame_size);
 
 	img->flags = FP_IMG_COLORS_INVERTED;
-	img->height = assemble(stripes, stripes_len,
+	img_height = img->height = assemble(stripes, stripes_len,
 		frame_width, frame_height,
 		img->data, FALSE, &errors_sum);
 	img->height = assemble(stripes, stripes_len,
 		frame_width, frame_height,
 		img->data, TRUE, &r_errors_sum);
 
-	if (r_errors_sum > errors_sum) {
-		img->height = assemble(stripes, stripes_len,
-			frame_width, frame_height,
-			img->data, FALSE, &errors_sum);
-		img->flags |= FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED;
-		fp_dbg("normal scan direction");
-	} else {
-		fp_dbg("reversed scan direction");
+	switch (reverse_detection_method) {
+	case ASSEMBLE_USE_IMAGE_HEIGHT:
+		if (img_height < img->height) {
+			img->height = assemble(stripes, stripes_len,
+				frame_width, frame_height,
+				img->data, FALSE, &errors_sum);
+			img->flags |= FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED;
+			fp_dbg("normal scan direction");
+		} else {
+			fp_dbg("reversed scan direction");
+		}
+	break;
+	case ASSEMBLE_USE_ERRORS_SUM:
+		if (r_errors_sum > errors_sum) {
+			img->height = assemble(stripes, stripes_len,
+				frame_width, frame_height,
+				img->data, FALSE, &errors_sum);
+			img->flags |= FP_IMG_V_FLIPPED | FP_IMG_H_FLIPPED;
+			fp_dbg("normal scan direction");
+		} else {
+			fp_dbg("reversed scan direction");
+		}
 	}
 
 	/* now that overlap has been removed, resize output image buffer */
