@@ -468,11 +468,13 @@ static void activate_read_id_cb(struct libusb_transfer *transfer)
 	if (data[0] == 0x07) {
 		fp_dbg("Sensor device id: %.2x%2x, bcdDevice: %.2x.%.2x, init status: %.2x\n",
 			data[4], data[3], data[5], data[6], data[7]);
+#if 0
 		if (data[7] == 0x23) {
 			/* Skip part of init if device is already initialized */
 			fpi_ssm_mark_completed(ssm);
 			goto out;
 		}
+#endif
 	} else {
 		fp_dbg("Bogus read ID response: %.2x\n", data[0]);
 		fpi_ssm_mark_aborted(ssm, -EPROTO);
@@ -516,7 +518,7 @@ static void activate_read_init_cb(struct libusb_transfer *transfer)
 	}
 	aesdev->init_idx++;
 	if (aesdev->init_idx == array_n_elements(init_cmds)) {
-		fpi_ssm_jump_to_state(ssm, ACTIVATE_SEND_READ_ID_CMD);
+		fpi_ssm_mark_completed(ssm);
 		goto out;
 	}
 
