@@ -51,6 +51,7 @@ struct aes1660_dev {
 	gboolean deactivating;
 	gboolean did_init;
 	unsigned int init_idx;
+	unsigned int frames_cnt;
 };
 
 static void aes1660_send_cmd(struct fpi_ssm *ssm, const unsigned char *cmd,
@@ -139,20 +140,6 @@ static void aes1660_read_calibrate_data_cb(struct libusb_transfer *transfer)
 out:
 	g_free(transfer->buffer);
 	libusb_free_transfer(transfer);
-}
-
-static int image_sum(unsigned char *buf)
-{
-	int sum = 0, x, y;
-	for (y = 0; y < 128; y++) {
-		for (x = 0; x < 4; x++) {
-			sum += (int)(buf[y * 4 + x] >> 4);
-			sum += (int)(buf[y * 4 + x] & 0xf);
-		}
-	}
-	fp_dbg("sum is %d", sum);
-
-	return sum;
 }
 
 /****** FINGER PRESENCE DETECTION ******/
@@ -289,20 +276,46 @@ enum capture_states {
 /* Returns number of processed bytes */
 static int process_stripe_data(struct fpi_ssm *ssm, unsigned char *data)
 {
+	int sum = 0, x, y;
 	unsigned char *stripdata;
+	unsigned char val1, val2;
 	struct fp_img_dev *dev = ssm->priv;
 	struct aes1660_dev *aesdev = dev->priv;
 
 	stripdata = g_malloc(FRAME_WIDTH * FRAME_HEIGHT / 2); /* 4 bits per pixel */
 	if (!stripdata) {
 		fpi_ssm_mark_aborted(ssm, -ENOMEM);
-		return -ENOMEM;
+		return sum;
 	}
-	memcpy(stripdata, data + 42, FRAME_WIDTH * FRAME_HEIGHT / 2);
+
+	/* 41 is image offset */
+	data += 41;
+
+	/* Copy image to the stripe buffer improving contrast,
+	 * and calculate sum
+	 */
+	for (y = 0; y < 128; y++) {
+		for (x = 0; x < 4; x++) {
+			val1 = data[y * 4 + x] >> 4;
+			val2 = data[y * 4 + x] & 0x0f;
+			val1 *= 2;
+			if (val1 > 15)
+				val1 = 15;
+			val2 *= 2;
+			if (val2 > 15)
+				val2 = 15;
+
+			sum += val1;
+			sum += val2;
+			stripdata[y * 4 + x] = (val1 << 4) | val2;
+		}
+	}
+	fp_dbg("sum is %d", sum);
+
 	aesdev->strips = g_slist_prepend(aesdev->strips, stripdata);
 	aesdev->strips_len++;
 
-	return 0;
+	return sum;
 }
 
 static void capture_set_idle_cmd_cb(struct libusb_transfer *transfer)
@@ -332,7 +345,10 @@ static void capture_set_idle_cmd_cb(struct libusb_transfer *transfer)
 static void capture_read_stripe_data_cb(struct libusb_transfer *transfer)
 {
 	struct fpi_ssm *ssm = transfer->user_data;
+	struct fp_img_dev *dev = ssm->priv;
+	struct aes1660_dev *aesdev = dev->priv;
 	unsigned char *data = transfer->buffer;
+	int sum;
 
 	if ((transfer->status != LIBUSB_TRANSFER_COMPLETED) ||
 		(transfer->length != transfer->actual_length)) {
@@ -346,8 +362,8 @@ static void capture_read_stripe_data_cb(struct libusb_transfer *transfer)
 		goto out;
 	}
 
-	process_stripe_data(ssm, data);
-	if (image_sum(data + 42) > 50) {
+	sum = process_stripe_data(ssm, data);
+	if (sum > 50 && aesdev->frames_cnt < 200) {
 		fpi_ssm_jump_to_state(ssm, CAPTURE_SEND_CAPTURE_CMD);
 	} else {
 		fpi_ssm_next_state(ssm);
@@ -359,8 +375,12 @@ out:
 
 static void capture_run_state(struct fpi_ssm *ssm)
 {
+	struct fp_img_dev *dev = ssm->priv;
+	struct aes1660_dev *aesdev = dev->priv;
+
 	switch (ssm->cur_state) {
 	case CAPTURE_SEND_LED_CMD:
+		aesdev->frames_cnt = 0;
 		aes1660_send_cmd(ssm, led_solid_cmd, sizeof(led_solid_cmd),
 			aes1660_send_cmd_cb);
 	break;
@@ -372,6 +392,7 @@ static void capture_run_state(struct fpi_ssm *ssm)
 		aes1660_read_response(ssm, 4, aes1660_read_calibrate_data_cb);
 	break;
 	case CAPTURE_SEND_CAPTURE_CMD:
+		aesdev->frames_cnt++;
 		aes1660_send_cmd(ssm, capture_cmd, sizeof(capture_cmd),
 			aes1660_send_cmd_cb);
 	break;
@@ -379,6 +400,7 @@ static void capture_run_state(struct fpi_ssm *ssm)
 		aes1660_read_response(ssm, 583, capture_read_stripe_data_cb);
 	break;
 	case CAPTURE_SET_IDLE:
+		fp_dbg("Got %d frames\n", aesdev->frames_cnt);
 		aes1660_send_cmd(ssm, set_idle_cmd, sizeof(set_idle_cmd),
 			capture_set_idle_cmd_cb);
 	break;
