@@ -281,6 +281,10 @@ static int process_stripe_data(struct fpi_ssm *ssm, unsigned char *data)
 	unsigned char val1, val2;
 	struct fp_img_dev *dev = ssm->priv;
 	struct aes1660_dev *aesdev = dev->priv;
+	/* Experimental values */
+	unsigned char color_lut[16] =
+		{ 0x0, 0x1, 0x5, 0x9, 0xc, 0xe, 0xf, 0xf,
+		0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf };
 
 	stripdata = g_malloc(FRAME_WIDTH * FRAME_HEIGHT / 2); /* 4 bits per pixel */
 	if (!stripdata) {
@@ -298,12 +302,8 @@ static int process_stripe_data(struct fpi_ssm *ssm, unsigned char *data)
 		for (x = 0; x < 4; x++) {
 			val1 = data[y * 4 + x] >> 4;
 			val2 = data[y * 4 + x] & 0x0f;
-			val1 *= 2;
-			if (val1 > 15)
-				val1 = 15;
-			val2 *= 2;
-			if (val2 > 15)
-				val2 = 15;
+			val1 = color_lut[val1];
+			val2 = color_lut[val2];
 
 			sum += val1;
 			sum += val2;
@@ -363,7 +363,7 @@ static void capture_read_stripe_data_cb(struct libusb_transfer *transfer)
 	}
 
 	sum = process_stripe_data(ssm, data);
-	if (sum > 50 && aesdev->frames_cnt < 200) {
+	if (sum > 50 && aesdev->frames_cnt < 400) {
 		fpi_ssm_jump_to_state(ssm, CAPTURE_SEND_CAPTURE_CMD);
 	} else {
 		fpi_ssm_next_state(ssm);
@@ -660,7 +660,7 @@ struct fp_img_driver aes1660_driver = {
 	 * binarized scan quality is good, minutiae detection is accurate,
 	 * it's just that we get fewer minutiae than other scanners (less scanning
 	 * area) */
-	.bz3_threshold = 10,
+	.bz3_threshold = 20,
 
 	.open = dev_init,
 	.close = dev_deinit,
