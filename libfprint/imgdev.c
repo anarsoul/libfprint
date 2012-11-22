@@ -113,6 +113,11 @@ static int sanitize_image(struct fp_img_dev *imgdev, struct fp_img **_img)
 		return -EINVAL;
 	}
 
+	if ((drv->scan_type == FP_SCAN_TYPE_SWIPE) && (img->height < img->width)) {
+		fp_err("on swipe scanner image height should be not less than image width");
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
