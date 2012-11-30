@@ -43,6 +43,7 @@ enable_aes2660='no'
 enable_aes4000='no'
 enable_vfs101='no'
 enable_vfs301='no'
+enable_dummy='no'
 
 AC_ARG_WITH([drivers],[AS_HELP_STRING([--with-drivers],
 	[List of drivers to enable])],
@@ -121,6 +122,10 @@ for driver in `echo ${drivers} | sed -e 's/,/ /g' -e 's/,$//g'`; do
 			AC_DEFINE([ENABLE_VFS301], [], [Build Validity VFS301/VFS300 driver])
 			enable_vfs301="yes"
 		;;
+		dummy)
+			AC_DEFINE([ENABLE_DUMMY], [], [Build dummy imaging driver])
+			enable_dummy="yes"
+		;;
 	esac
 done
 
@@ -141,6 +146,7 @@ AM_CONDITIONAL([REQUIRE_AESLIB], [test "$require_aeslib" = "yes"])
 AM_CONDITIONAL([REQUIRE_AESX660], [test "$require_aesX660" = "yes"])
 AM_CONDITIONAL([ENABLE_VFS101], [test "$enable_vfs101" = "yes"])
 AM_CONDITIONAL([ENABLE_VFS301], [test "$enable_vfs301" = "yes"])
+AM_CONDITIONAL([ENABLE_DUMMY], [test "$enable_dummy" = "yes"])
 
 
 PKG_CHECK_MODULES(LIBUSB, [libusb-1.0 >= 0.9.1])
@@ -347,6 +353,11 @@ if test x$enable_vfs301 != xno ; then
 	AC_MSG_NOTICE([** vfs301 driver enabled])
 else
 	AC_MSG_NOTICE([   vfs301 driver disabled])
+fi
+if test x$enable_dummy != xno ; then
+	AC_MSG_NOTICE([** dummy driver enabled])
+else
+	AC_MSG_NOTICE([   dummy driver disabled])
 fi
 if test x$require_aeslib != xno ; then
 	AC_MSG_NOTICE([** aeslib helper functions enabled])

@@ -41,14 +41,16 @@ API_EXPORTED int fp_async_dev_open(struct fp_dscv_dev *ddev, fp_dev_open_cb cb,
 {
 	struct fp_driver *drv = ddev->drv;
 	struct fp_dev *dev;
-	libusb_device_handle *udevh;
+	libusb_device_handle *udevh = NULL;
 	int r;
 
-	fp_dbg("");
-	r = libusb_open(ddev->udev, &udevh);
-	if (r < 0) {
-		fp_err("usb_open failed, error %d", r);
-		return r;
+	fp_dbg("async dev open");
+	if (ddev->udev) {
+		r = libusb_open(ddev->udev, &udevh);
+		if (r < 0) {
+			fp_err("usb_open failed, error %d", r);
+			return r;
+		}
 	}
 
 	dev = g_malloc0(sizeof(*dev));
@@ -68,7 +70,8 @@ API_EXPORTED int fp_async_dev_open(struct fp_dscv_dev *ddev, fp_dev_open_cb cb,
 	r = drv->open(dev, ddev->driver_data);
 	if (r) {
 		fp_err("device initialisation failed, driver=%s", drv->name);
-		libusb_close(udevh);
+		if (udevh)
+			libusb_close(udevh);
 		g_free(dev);
 	}
 
@@ -81,7 +84,8 @@ void fpi_drvcb_close_complete(struct fp_dev *dev)
 	fp_dbg("");
 	BUG_ON(dev->state != DEV_STATE_DEINITIALIZING);
 	dev->state = DEV_STATE_DEINITIALIZED;
-	libusb_close(dev->udev);
+	if (dev->udev)
+		libusb_close(dev->udev);
 	if (dev->close_cb)
 		dev->close_cb(dev, dev->close_cb_data);
 	g_free(dev);

@@ -450,6 +450,8 @@ static struct fp_driver *find_supporting_driver(libusb_device *udev,
 		uint32_t type = 0;
 		const struct usb_id *id;
 
+		if (!drv->id_table)
+			continue;
 		for (id = drv->id_table; id->vendor; id++) {
 			if (dsc.idVendor == id->vendor && dsc.idProduct == id->product) {
 				if (drv->discover) {
@@ -509,6 +511,23 @@ static struct fp_dscv_dev *discover_dev(libusb_device *udev)
 	return ddev;
 }
 
+#ifdef ENABLE_DUMMY
+static struct fp_dscv_dev *discover_dummy_dev(void)
+{
+	struct fp_driver *drv;
+	struct fp_dscv_dev *ddev;
+
+	drv = &dummy_driver.driver;
+
+	ddev = g_malloc0(sizeof(*ddev));
+	ddev->drv = drv;
+	ddev->udev = NULL;
+	ddev->driver_data = 0;
+	ddev->devtype = 0;
+	return ddev;
+}
+#endif
+
 /** \ingroup dscv_dev
  * Scans the system and returns a list of discovered devices. This is your
  * entry point into finding a fingerprint reader to operate.
@@ -525,8 +544,15 @@ API_EXPORTED struct fp_dscv_dev **fp_discover_devs(void)
 	int r;
 	int i = 0;
 
+#ifdef ENABLE_DUMMY
+	fp_dbg("Adding dummy driver");
+	fpi_img_driver_setup(&dummy_driver);
+	tmplist = g_slist_prepend(tmplist, (gpointer) discover_dummy_dev());
+	dscv_count++;
+#endif
+
 	if (registered_drivers == NULL)
-		return NULL;
+		goto skip_usb_devs;
 
 	r = libusb_get_device_list(fpi_usb_ctx, &devs);
 	if (r < 0) {
@@ -547,6 +573,7 @@ API_EXPORTED struct fp_dscv_dev **fp_discover_devs(void)
 		dscv_count++;
 	}
 
+skip_usb_devs:
 	/* Convert our temporary GSList into a standard NULL-terminated pointer
 	 * array. */
 	list = g_malloc(sizeof(*list) * (dscv_count + 1));
