@@ -37,6 +37,7 @@ enum {
 	AES1660_ID	= 14,
 	AES2660_ID	= 15,
 	UPEKTC_IMG_ID	= 16,
+	ETES603_ID	= 17,
 };
 
 #endif
