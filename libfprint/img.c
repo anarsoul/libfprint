@@ -343,44 +343,206 @@ int fpi_img_to_print_data(struct fp_img_dev *imgdev, struct fp_img *img,
 int fpi_img_compare_print_data(struct fp_print_data *enrolled_print,
 	struct fp_print_data *new_print)
 {
-	struct xyt_struct *gstruct = (struct xyt_struct *) enrolled_print->data;
 	struct xyt_struct *pstruct = (struct xyt_struct *) new_print->data;
+	struct xyt_struct *gstruct = NULL;
 	GTimer *timer;
-	int r;
+	int score;
 
-	if (enrolled_print->type != PRINT_DATA_NBIS_MINUTIAE ||
-			new_print->type != PRINT_DATA_NBIS_MINUTIAE) {
+	if ((enrolled_print->type != PRINT_DATA_NBIS_MINUTIAE &&
+	     enrolled_print->type != PRINT_DATA_NBIS_MINUTIAE_GALLERY) ||
+	     new_print->type != PRINT_DATA_NBIS_MINUTIAE) {
 		fp_err("invalid print format");
 		return -EINVAL;
 	}
 
-	timer = g_timer_new();
-	r = bozorth_main(pstruct, gstruct);
-	g_timer_stop(timer);
-	fp_dbg("bozorth processing took %f seconds, score=%d",
-		g_timer_elapsed(timer, NULL), r);
-	g_timer_destroy(timer);
 
-	return r;
+	switch (enrolled_print->type) {
+	case PRINT_DATA_NBIS_MINUTIAE:
+		timer = g_timer_new();
+		score = bozorth_main(pstruct, gstruct);
+		g_timer_stop(timer);
+		fp_dbg("bozorth processing took %f seconds, score=%d",
+			g_timer_elapsed(timer, NULL), score);
+		g_timer_destroy(timer);
+		return score;
+	break;
+	case PRINT_DATA_NBIS_MINUTIAE_GALLERY:
+	{
+		int max_score = 0;
+		size_t bytes_left = enrolled_print->length;
+		unsigned char *buf = enrolled_print->data;
+		struct fp_gallery_item *item;;
+		int probe_len = bozorth_probe_init(pstruct);
+
+		while (bytes_left) {
+			item = (struct fp_gallery_item *)buf;
+			gstruct = (struct xyt_struct *)item->data;
+			score = bozorth_to_gallery(probe_len, pstruct, gstruct);
+			fp_dbg("score %d", score);
+			max_score = max(score, max_score);
+			buf += item->item_length;
+			buf += sizeof(struct fp_gallery_item);
+			bytes_left -= item->item_length;
+			bytes_left -= sizeof(struct fp_gallery_item);
+		}
+		return max_score;
+	}
+	break;
+	default:
+		BUG();
+		return 0;
+	break;
+	}
 }
 
 int fpi_img_compare_print_data_to_gallery(struct fp_print_data *print,
 	struct fp_print_data **gallery, int match_threshold, size_t *match_offset)
 {
 	struct xyt_struct *pstruct = (struct xyt_struct *) print->data;
+	struct xyt_struct *gstruct;
 	struct fp_print_data *gallery_print;
 	int probe_len = bozorth_probe_init(pstruct);
 	size_t i = 0;
+	int r;
 
 	while ((gallery_print = gallery[i++])) {
-		struct xyt_struct *gstruct = (struct xyt_struct *) gallery_print->data;
-		int r = bozorth_to_gallery(probe_len, pstruct, gstruct);
-		if (r >= match_threshold) {
-			*match_offset = i - 1;
-			return FP_VERIFY_MATCH;
+		switch (gallery_print->type) {
+		case PRINT_DATA_NBIS_MINUTIAE:
+		{
+			gstruct = (struct xyt_struct *) gallery_print->data;
+			r = bozorth_to_gallery(probe_len, pstruct, gstruct);
+			if (r >= match_threshold) {
+				*match_offset = i - 1;
+				return FP_VERIFY_MATCH;
+			}
+		}
+		break;
+		case PRINT_DATA_NBIS_MINUTIAE_GALLERY:
+		{
+			size_t bytes_left = gallery_print->length;
+			unsigned char *buf = gallery_print->data;
+			struct fp_gallery_item *item;;
+			while (bytes_left) {
+				item = (struct fp_gallery_item *)buf;
+				gstruct = (struct xyt_struct *)item->data;
+				r = bozorth_to_gallery(probe_len, pstruct, gstruct);
+				if (r >= match_threshold) {
+					*match_offset = i - 1;
+					return FP_VERIFY_MATCH;
+				}
+				buf += item->item_length;
+				buf += sizeof(struct fp_gallery_item);
+				bytes_left -= item->item_length;
+				bytes_left -= sizeof(struct fp_gallery_item);
+			}
+		}
+		break;
+		default:
+			BUG();
+		break;
 		}
 	}
 	return FP_VERIFY_NO_MATCH;
+}
+
+static size_t append_print_data_to_buf(unsigned char *buf,
+	const struct fp_print_data *print)
+{
+	size_t consumed = 0;
+	switch (print->type) {
+	case PRINT_DATA_NBIS_MINUTIAE:
+	{
+		struct fp_gallery_item *item = (struct fp_gallery_item *)buf;
+		item->item_length = print->length;
+		memcpy(item->data, print->data, print->length);
+		consumed += sizeof(struct fp_gallery_item);
+		consumed += print->length;
+
+		fp_dbg("appending print data, len %d", item->item_length);
+	}
+	break;
+	case PRINT_DATA_NBIS_MINUTIAE_GALLERY:
+	{
+		memcpy(buf, print->data, print->length);
+		consumed += print->length;
+
+		fp_dbg("appending print gallery data, len %d", print->length);
+	}
+	break;
+	default:
+		BUG();
+	break;
+	}
+	return consumed;
+}
+
+int fpi_img_append_print_data(struct fp_img_dev *imgdev,
+	struct fp_print_data **result,
+	const struct fp_print_data *old_print,
+	const struct fp_print_data *new_print)
+{
+	struct fp_print_data *print;
+	size_t total_size = 0, consumed;
+	unsigned char *buf;
+
+	if (!result)
+		return -EINVAL;
+
+	if (old_print &&
+	    old_print->type != PRINT_DATA_NBIS_MINUTIAE &&
+	    old_print->type != PRINT_DATA_NBIS_MINUTIAE_GALLERY) {
+		fp_dbg("unknown datatype in old_print");
+		return -EINVAL;
+	}
+
+	if (new_print &&
+	    new_print->type != PRINT_DATA_NBIS_MINUTIAE &&
+	    new_print->type != PRINT_DATA_NBIS_MINUTIAE_GALLERY) {
+		fp_dbg("unknown datatype in new_print");
+		return -EINVAL;
+	}
+
+	if (old_print &&
+	    new_print &&
+	    !fpi_print_data_compatible(old_print->driver_id,
+				       old_print->devtype, old_print->type,
+				       new_print->driver_id,
+				       new_print->devtype, new_print->type)) {
+		fp_dbg("incompatible prints passed");
+		return -EINVAL;
+	}
+
+
+	if (old_print) {
+		total_size += old_print->length;
+		if (old_print->type != PRINT_DATA_NBIS_MINUTIAE_GALLERY) {
+			total_size += sizeof(struct fp_gallery_item);
+		}
+	}
+	if (new_print) {
+		total_size += new_print->length;
+		if (new_print->type != PRINT_DATA_NBIS_MINUTIAE_GALLERY) {
+			total_size += sizeof(struct fp_gallery_item);
+		}
+	}
+
+	*result = print = fpi_print_data_new(imgdev->dev, total_size);
+	print->type = PRINT_DATA_NBIS_MINUTIAE_GALLERY;
+	buf = print->data;
+
+	if (old_print) {
+		consumed = append_print_data_to_buf(buf, old_print);
+		BUG_ON(consumed == 0);
+		buf += consumed;
+	}
+
+	if (new_print) {
+		consumed = append_print_data_to_buf(buf, new_print);
+		BUG_ON(consumed == 0);
+		buf += consumed;
+	}
+
+	return 0;
 }
 
 /** \ingroup img

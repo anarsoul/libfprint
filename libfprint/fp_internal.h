@@ -179,7 +179,9 @@ struct fp_img_dev {
 	int action_state;
 
 	struct fp_print_data *acquire_data;
+	struct fp_print_data *enroll_data;
 	struct fp_img *acquire_img;
+	int enroll_stage;
 	int action_result;
 
 	/* FIXME: better place to put this? */
@@ -320,6 +322,7 @@ struct fp_dscv_print {
 enum fp_print_data_type {
 	PRINT_DATA_RAW = 0, /* memset-imposed default */
 	PRINT_DATA_NBIS_MINUTIAE,
+	PRINT_DATA_NBIS_MINUTIAE_GALLERY,
 };
 
 struct fp_print_data {
@@ -330,13 +333,20 @@ struct fp_print_data {
 	unsigned char data[0];
 };
 
-struct fpi_print_data_fp1 {
+struct fpi_print_data_fp2 {
 	char prefix[3];
 	uint16_t driver_id;
 	uint32_t devtype;
 	unsigned char data_type;
 	unsigned char data[0];
 } __attribute__((__packed__));
+
+struct fp_gallery_item {
+	/* Inner data length */
+	uint32_t item_length;
+	/* Inner data */
+	unsigned char data[0];
+};
 
 void fpi_data_exit(void);
 struct fp_print_data *fpi_print_data_new(struct fp_dev *dev, size_t length);
@@ -380,6 +390,8 @@ int fpi_img_compare_print_data(struct fp_print_data *enrolled_print,
 	struct fp_print_data *new_print);
 int fpi_img_compare_print_data_to_gallery(struct fp_print_data *print,
 	struct fp_print_data **gallery, int match_threshold, size_t *match_offset);
+int fpi_img_append_print_data(struct fp_img_dev *imgdev, struct fp_print_data **result,
+	const struct fp_print_data *old_print, const struct fp_print_data *new_print);
 struct fp_img *fpi_im_resize(struct fp_img *img, unsigned int w_factor, unsigned int h_factor);
 
 /* polling and timeouts */

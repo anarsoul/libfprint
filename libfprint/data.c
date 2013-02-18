@@ -125,7 +125,7 @@ struct fp_print_data *fpi_print_data_new(struct fp_dev *dev, size_t length)
 API_EXPORTED size_t fp_print_data_get_data(struct fp_print_data *data,
 	unsigned char **ret)
 {
-	struct fpi_print_data_fp1 *buf;
+	struct fpi_print_data_fp2 *buf;
 	size_t buflen;
 
 	fp_dbg("");
@@ -138,10 +138,11 @@ API_EXPORTED size_t fp_print_data_get_data(struct fp_print_data *data,
 	*ret = (unsigned char *) buf;
 	buf->prefix[0] = 'F';
 	buf->prefix[1] = 'P';
-	buf->prefix[2] = '1';
+	buf->prefix[2] = '2';
 	buf->driver_id = GUINT16_TO_LE(data->driver_id);
 	buf->devtype = GUINT32_TO_LE(data->devtype);
 	buf->data_type = data->type;
+	/* FIXME: fp_print_data->data content is not endianess agnostic */
 	memcpy(buf->data, data->data, data->length);
 	return buflen;
 }
@@ -158,7 +159,7 @@ API_EXPORTED size_t fp_print_data_get_data(struct fp_print_data *data,
 API_EXPORTED struct fp_print_data *fp_print_data_from_data(unsigned char *buf,
 	size_t buflen)
 {
-	struct fpi_print_data_fp1 *raw = (struct fpi_print_data_fp1 *) buf;
+	struct fpi_print_data_fp2 *raw = (struct fpi_print_data_fp2 *) buf;
 	size_t print_data_len;
 	struct fp_print_data *data;
 
@@ -166,7 +167,8 @@ API_EXPORTED struct fp_print_data *fp_print_data_from_data(unsigned char *buf,
 	if (buflen < sizeof(*raw))
 		return NULL;
 
-	if (strncmp(raw->prefix, "FP1", 3) != 0) {
+	if ((strncmp(raw->prefix, "FP1", 3) != 0) &&
+	    (strncmp(raw->prefix, "FP2", 3) != 0)) {
 		fp_dbg("bad header prefix");
 		return NULL;
 	}
@@ -174,6 +176,7 @@ API_EXPORTED struct fp_print_data *fp_print_data_from_data(unsigned char *buf,
 	print_data_len = buflen - sizeof(*raw);
 	data = print_data_new(GUINT16_FROM_LE(raw->driver_id),
 		GUINT32_FROM_LE(raw->devtype), raw->data_type, print_data_len);
+	/* FIXME: fp_print_data->data content is not endianess agnostic */
 	memcpy(data->data, raw->data, print_data_len);
 	return data;
 }
@@ -282,6 +285,12 @@ gboolean fpi_print_data_compatible(uint16_t driver_id1, uint32_t devtype1,
 		fp_dbg("devtype mismatch: %04x vs %04x", devtype1, devtype2);
 		return FALSE;
 	}
+
+	/* Gallery is compatible with single print */
+	if (type1 == PRINT_DATA_NBIS_MINUTIAE_GALLERY)
+		type1 = PRINT_DATA_NBIS_MINUTIAE;
+	if (type2 == PRINT_DATA_NBIS_MINUTIAE_GALLERY)
+		type2 = PRINT_DATA_NBIS_MINUTIAE;
 
 	if (type1 != type2) {
 		fp_dbg("type mismatch: %d vs %d", type1, type2);
