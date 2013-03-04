@@ -65,7 +65,7 @@
 #define VFS_IMG_BEST_CONRAST	128
 
 /* Number of enroll stages */
-#define VFS_NR_ENROLL		3
+#define VFS_NR_ENROLL		1
 
 /* Device parameters address */
 #define VFS_PAR_000E			0x000e
@@ -1510,9 +1510,6 @@ static int dev_open(struct fp_img_dev *dev, unsigned long driver_data)
 		fp_err("could not claim interface 0");
 		return r;
 	}
-
-	/* Set enroll stage number */
-	dev->dev->nr_enroll_stages = VFS_NR_ENROLL;
 
 	/* Initialize private structure */
 	vdev = g_malloc0(sizeof(struct vfs101_dev));
