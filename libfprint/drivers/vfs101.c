@@ -65,7 +65,7 @@
 #define VFS_IMG_BEST_CONRAST	128
 
 /* Number of enroll stages */
-#define VFS_NR_ENROLL		1
+#define VFS_NR_ENROLL		5
 
 /* Device parameters address */
 #define VFS_PAR_000E			0x000e
