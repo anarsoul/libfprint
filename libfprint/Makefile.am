@@ -48,6 +48,7 @@ EXTRA_DIST = \
 	aeslib.c aeslib.h	\
 	imagemagick.c		\
 	gdkpixbuf.c		\
+	pixman.c		\
 	60-fprint-autosuspend.rules
 
 DRIVER_SRC =
@@ -185,6 +186,12 @@ endif
 
 if REQUIRE_GDKPIXBUF
 OTHER_SRC += gdkpixbuf.c
+libfprint_la_CFLAGS += $(IMAGING_CFLAGS)
+libfprint_la_LIBADD += $(IMAGING_LIBS)
+endif
+
+if REQUIRE_PIXMAN
+OTHER_SRC += pixman.c
 libfprint_la_CFLAGS += $(IMAGING_CFLAGS)
 libfprint_la_LIBADD += $(IMAGING_LIBS)
 endif
