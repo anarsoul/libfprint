@@ -1327,7 +1327,7 @@ static int dev_init(struct fp_img_dev *dev, unsigned long driver_data)
 		sdev->img_width = IMG_WIDTH_1001;
 		upeksonly_driver.img_width = IMG_WIDTH_1001;
 		sdev->diff_thresh = 1300;
-		sdev->total_thresh = 35000;
+		sdev->total_thresh = 40000;
 		break;
 	case UPEKSONLY_2016:
 		sdev->img_width = IMG_WIDTH_2016;
