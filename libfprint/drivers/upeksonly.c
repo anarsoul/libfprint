@@ -277,7 +277,7 @@ static void row_complete(struct fp_img_dev *dev)
 			 * actual scan. Happens most commonly if scan is started
 			 * from before the first joint resulting in a gap after the inital touch.
 			 */
-			if ((sdev->num_blank > 500)
+			if ((sdev->num_blank > 32)
 			    && ((sdev->num_rows > MIN_ROWS) || (sdev->num_blank > 5000))) {
 				sdev->finger_state = FINGER_REMOVED;
 				fp_dbg("detected finger removal. Blank rows: %d, Full rows: %d", sdev->num_blank, sdev->num_rows);
