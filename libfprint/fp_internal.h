@@ -26,7 +26,7 @@
 #include <glib.h>
 #include <libusb.h>
 
-#include <fprint.h>
+#include "fprint.h"
 
 #define array_n_elements(array) (sizeof(array) / sizeof(array[0]))
 
@@ -109,6 +109,7 @@ struct fp_dev {
 
 	/* read-only to drivers */
 	struct fp_print_data *verify_data;
+	unsigned long driver_data;
 
 	/* drivers should not mess with any of the below */
 	enum fp_dev_state state;
@@ -157,7 +158,7 @@ enum fp_imgdev_action {
 	IMG_ACTION_CAPTURE,
 };
 
-enum fp_imgdev_enroll_state {
+enum fp_imgdev_aquire_state {
 	IMG_ACQUIRE_STATE_NONE = 0,
 	IMG_ACQUIRE_STATE_ACTIVATING,
 	IMG_ACQUIRE_STATE_AWAIT_FINGER_ON,
@@ -167,16 +168,17 @@ enum fp_imgdev_enroll_state {
 	IMG_ACQUIRE_STATE_DEACTIVATING,
 };
 
+/* Unused
 enum fp_imgdev_verify_state {
 	IMG_VERIFY_STATE_NONE = 0,
 	IMG_VERIFY_STATE_ACTIVATING
-};
+}; */
 
 struct fp_img_dev {
 	struct fp_dev *dev;
 	libusb_device_handle *udev;
 	enum fp_imgdev_action action;
-	int action_state;
+	enum fp_imgdev_aquire_state action_state;
 
 	struct fp_print_data *acquire_data;
 	struct fp_print_data *enroll_data;
@@ -417,6 +419,33 @@ void fpi_timeout_cancel(struct fpi_timeout *timeout);
 
 /* async drv <--> lib comms */
 
+enum fpi_event
+{
+    FP_ASYNC_DEV_OPEN,
+    FP_ASYNC_DEV_CLOSE,
+    FP_ASYNC_ENROLL_START,
+    FP_ASYNC_ENROLL_STOP,
+    FP_ASYNC_VERIFY_START,
+    FP_ASYNC_VERIFY_STOP,
+    FP_ASYNC_IDENTIFY_START,
+    FP_ASYNC_IDENTIFY_STOP,
+    FP_ASYNC_CAPTURE_START,
+    FP_ASYNC_CAPTURE_STOP,
+
+    FPI_EVENT_SSM_CALL_HANDLER,
+    FPI_EVENT_SSM_CALLBACK,
+};
+struct fpi_event_data
+{
+    enum fpi_event event;
+    gpointer data;
+    gpointer user_data;
+    gconstpointer callback;
+};
+GThreadPool *thread_pool;
+int fpi_event_push(enum fpi_event, gpointer data);
+//int fpi_event_push(enum fpi_event, gpointer data, gpointer user_data, gconstpointer callback);
+void fpi_thread_pool (gpointer event_data, gpointer user_data);
 struct fpi_ssm;
 typedef void (*ssm_completed_fn)(struct fpi_ssm *ssm);
 typedef void (*ssm_handler_fn)(struct fpi_ssm *ssm);
@@ -427,11 +456,14 @@ typedef void (*ssm_handler_fn)(struct fpi_ssm *ssm);
 struct fpi_ssm {
 	struct fp_dev *dev;
 	struct fpi_ssm *parentsm;
+	struct fpi_ssm *childsm;
 	void *priv;
 	int nr_states;
 	int cur_state;
 	gboolean completed;
 	int error;
+	gboolean idle;
+	gboolean cancelling;
 	ssm_completed_fn callback;
 	ssm_handler_fn handler;
 };
@@ -443,9 +475,12 @@ struct fpi_ssm *fpi_ssm_new(struct fp_dev *dev, ssm_handler_fn handler,
 void fpi_ssm_free(struct fpi_ssm *machine);
 void fpi_ssm_start(struct fpi_ssm *machine, ssm_completed_fn callback);
 void fpi_ssm_start_subsm(struct fpi_ssm *parent, struct fpi_ssm *child);
-int fpi_ssm_has_completed(struct fpi_ssm *machine);
+int fpi_ssm_has_completed(struct fpi_ssm *machine);     // TODO: not implemented
+void fpi_ssm_async_abort(struct fpi_ssm *ssm, int error);
+void fpi_ssm_async_complete(struct fpi_ssm *ssm);
 
 /* for drivers */
+void fpi_ssm_idle(struct fpi_ssm *ssm);
 void fpi_ssm_next_state(struct fpi_ssm *machine);
 void fpi_ssm_jump_to_state(struct fpi_ssm *machine, int state);
 void fpi_ssm_mark_completed(struct fpi_ssm *machine);
