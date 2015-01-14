@@ -25,199 +25,140 @@
 
 #include "fp_internal.h"
 
+enum fpi_ssm_events {
+    FPI_SSM_NEXT_STATE,
+    FPI_SSM_JUMP_TO_STATE,
+    FPI_SSM_MARK_COMPLETED,
+    FPI_SSM_MARK_ABORTED,
+    FPI_SSM_MARK_IDLE,
+    FPI_SSM_ASYNC_ABORT,
+};
+struct __fpi_ssm_event {
+    enum fpi_ssm_events event;
+    int state;
+    int error;
+    struct fpi_ssm *ssm;
+};
 
-/* Thread pool
- *
- * The main thing is that we do not want to hi-jack the thread of a calling external
- * program or library. This also makes the libfprint more responsive and reliable.
- *
- * Callbacks from libusb should be routed through the threadpool before any significant
- * work is done.
- * Async calls to libfprint should be routed here also.
- * Internal calls might want to use the thread pool to avoid too many recursive calls
- * and a messed up stack.
- */
-
-GThreadPool *thread_pool = NULL;
-
-// Send task to thread pool
-int fpi_event_push(enum fpi_event event, gpointer data)
+/* Invoke the state handler */
+static void __ssm_call_handler(struct fpi_ssm *machine)
 {
-    if (thread_pool == NULL)
-    {
-        thread_pool = g_thread_pool_new(fpi_thread_pool, NULL, 1, TRUE, NULL);
-        if (thread_pool == 0)
-            return -1;
+	machine->idle = FALSE;
+    if (machine->cancelling) {
+        fp_dbg("The SSM has been asked to abort, complying");
+        fpi_ssm_mark_completed(machine);
+        return;
     }
-
-    struct fpi_event_data *event_data = g_malloc0(sizeof(*event_data)); // TODO: Error handling
-    event_data->event = event;
-    event_data->data = data;
-    //event_data->user_data = user_data;
-    //event_data->callback = callback;
-    g_thread_pool_push(thread_pool, event_data, NULL); // TODO: Error handling.
-    return 0;
+	fp_dbg("%p entering state %d", machine, machine->cur_state);
+    machine->handler(machine);
 }
-
-void fpi_thread_pool (gpointer event_data, gpointer user_data)
+static void __subsm_complete(struct fpi_ssm *ssm)
 {
-    struct fpi_event_data *l_event_data = event_data;
-    enum fpi_event event = l_event_data->event;
-    gpointer data = l_event_data->data;
-    //gpointer callback_user_data = l_event_data->user_data;
-    struct fp_dev *dev = data;
-    struct fp_driver *drv = NULL;
-    struct fpi_ssm *machine = data;
+	struct fpi_ssm *parent = ssm->parentsm;
+	int error = ssm->error;
+	BUG_ON(!parent);
+	fpi_ssm_free(ssm);
+	if (error)
+		fpi_ssm_mark_aborted(parent, error);
+	else
+		fpi_ssm_next_state(parent);
+}
+static void __fpi_ssm_thread (struct fp_dev *dev, gpointer user_data)
+{
+    struct __fpi_ssm_event *data =  user_data;
+    struct fpi_ssm *ssm = data->ssm;
+    int state = data->state;
+    int error = data->error;
 
-    fp_dbg("%d", event);
-    switch (event)
-    {
-    case FP_ASYNC_DEV_OPEN:
-        drv = dev->drv;
-        if (!drv->open)
-        {
-            fpi_drvcb_open_complete(dev, 0);
-            break;
-        }
-        int r = drv->open(dev, dev->driver_data);
-        if (r)
-        {
-            fpi_drvcb_open_complete(dev, r);
-            libusb_close(dev->udev);
-            g_free(dev);
-        }
-        break;
-
-    case FP_ASYNC_DEV_CLOSE:
-        drv = dev->drv;
-        if (!drv->close)
-        {
-            fpi_drvcb_close_complete(dev);
-            break;
-        }
-
-        dev->state = DEV_STATE_DEINITIALIZING;
-        drv->close(dev);
-        break;
-
-    case FP_ASYNC_ENROLL_START:
-        drv = dev->drv;
-        r = drv->enroll_start(dev);
-        if (r < 0) {
-            fp_err("failed to start enrollment");
-            dev->state = DEV_STATE_ERROR;
-            fpi_drvcb_enroll_started(dev, r);
-            dev->enroll_stage_cb = NULL;
+    switch (data->event) {
+    case FPI_SSM_NEXT_STATE:
+        BUG_ON(ssm->childsm);
+        BUG_ON(ssm->completed);
+        ssm->cur_state++;
+        if (ssm->cur_state == ssm->nr_states) {
+            fpi_ssm_mark_completed(ssm);
+        } else {
+            __ssm_call_handler(ssm);
         }
         break;
 
-    case FP_ASYNC_ENROLL_STOP:
-        drv = dev->drv;
-        if (!drv->enroll_stop) {
-            fpi_drvcb_enroll_stopped(dev);
-            break;
-        }
+    case FPI_SSM_JUMP_TO_STATE:
+        BUG_ON(ssm->childsm);
+        BUG_ON(ssm->completed);
+        BUG_ON(state >= ssm->nr_states);
+        ssm->cur_state = state;
+        __ssm_call_handler(ssm);
+        break;
 
-        r = drv->enroll_stop(dev);
-        if (r < 0) {
-            fp_err("failed to stop enrollment");
-            fpi_drvcb_enroll_stopped(dev); // TODO: The callback is not aware of failure
-            dev->enroll_stop_cb = NULL;
+    case FPI_SSM_MARK_COMPLETED:
+        BUG_ON(ssm->completed);
+        if(ssm->childsm) {
+            fp_dbg("The SSM (with child) has been asked to complete, complying");
+            fpi_ssm_mark_completed(ssm->childsm);
+        } else {
+            ssm->completed = TRUE;
+            if (ssm->callback) {
+                fp_dbg("%p completed with status %d", ssm, ssm->error);
+                ssm->callback(ssm);
+            }
         }
         break;
 
-    case FP_ASYNC_VERIFY_START:
-        drv = dev->drv;
-        r = drv->verify_start(dev);
-        if (r < 0) {
-            fp_err("failed to start verification, error %d", r);
-            dev->state = DEV_STATE_ERROR;
-            fpi_drvcb_verify_started(dev, r);
-            dev->verify_cb = NULL;
+    case FPI_SSM_MARK_ABORTED:
+        BUG_ON(ssm->childsm);
+        fp_dbg("error %d from state %d", error, ssm->cur_state);
+        BUG_ON(error == 0);
+        if(ssm->childsm) {
+            fp_dbg("The SSM (with child) has been asked to abort, complying");
+            fpi_ssm_mark_aborted(ssm->childsm, error);
+        } else {
+            ssm->error = error;
+            ssm->completed = TRUE;
+            if (ssm->callback) {
+                fp_dbg("%p completed with status %d", ssm, ssm->error);
+                ssm->callback(ssm);
+            }
         }
         break;
 
-    case FP_ASYNC_VERIFY_STOP:
-        drv = dev->drv;
-        if (!drv->verify_stop) {
-            dev->state = DEV_STATE_INITIALIZED;
-            fpi_drvcb_verify_stopped(dev);
-            break;
+    case FPI_SSM_ASYNC_ABORT:
+        if(ssm->abort_handler) {
+            fp_dbg("Calling abort handler");
+            ssm->abort_handler(ssm, error);
         }
-
-        r = drv->verify_stop(dev, (dev->state == DEV_STATE_VERIFYING));
-        if (r < 0) {
-            fp_err("failed to stop verification");
-            fpi_drvcb_verify_stopped(dev); // TODO: The callback is not aware of failure
-            dev->verify_stop_cb = NULL;
-        }
-        break;
-
-    case FP_ASYNC_IDENTIFY_START:
-        drv = dev->drv;
-        r = drv->identify_start(dev);
-        if (r < 0) {
-            fp_err("identify_start failed with error %d", r);
-            dev->state = DEV_STATE_ERROR;
-            fpi_drvcb_identify_started(dev, r);
-            dev->identify_cb = NULL;
+        else {
+            if(ssm->idle)
+                if(error)
+                    fpi_ssm_mark_aborted(ssm, error);
+                else
+                    fpi_ssm_mark_completed(ssm);
+            else
+                ssm->cancelling = TRUE;
         }
         break;
 
-    case FP_ASYNC_IDENTIFY_STOP:
-        drv = dev->drv;
-        if (!drv->identify_stop) {
-            dev->state = DEV_STATE_INITIALIZED;
-            fpi_drvcb_identify_stopped(dev);
-            break;
-        }
-
-        r = drv->identify_stop(dev, (dev->state == DEV_STATE_VERIFYING));
-        if (r < 0) {
-            fp_err("failed to stop identification");
-            fpi_drvcb_identify_stopped(dev); // TODO: The callback is not aware of failure
-            dev->identify_stop_cb = NULL;
-        }
+    case FPI_SSM_MARK_IDLE:
+        fp_dbg("Idle");
+        ssm->idle = TRUE;
         break;
 
-    case FP_ASYNC_CAPTURE_START:
-        drv = dev->drv;
-        r = drv->capture_start(dev);
-        if (r < 0) {
-            dev->state = DEV_STATE_ERROR;
-            fp_err("failed to start verification, error %d", r);
-            fpi_drvcb_capture_started(dev, r);
-            dev->capture_cb = NULL;
-        }
-        break;
-
-    case FP_ASYNC_CAPTURE_STOP:
-        drv = dev->drv;
-        if (!drv->capture_stop) {
-            dev->state = DEV_STATE_INITIALIZED;
-            fpi_drvcb_capture_stopped(dev);
-            break;
-        }
-
-        r = drv->capture_stop(dev);
-        if (r < 0) {
-            fp_err("failed to stop capture");
-            fpi_drvcb_capture_stopped(dev); // TODO: The callback is not aware of failure
-            dev->capture_stop_cb = NULL;
-        }
-        break;
-
-    case FPI_EVENT_SSM_CALL_HANDLER:
-        machine->handler(machine);      // TODO: We have race issues.
-        break;
-
-    case FPI_EVENT_SSM_CALLBACK:
-        machine->callback(machine);
+    default:
+        BUG_ON(TRUE);
         break;
     }
-
-    g_free(event_data);
+    g_slice_free(struct __fpi_ssm_event, data);
 }
+
+static void __fpi_ssm_event_push (struct fpi_ssm *ssm, enum fpi_ssm_events event, int error, int state)
+{
+    struct __fpi_ssm_event *data = g_slice_new(struct __fpi_ssm_event); // TODO: Error handling.
+    data->error = error;
+    data->event = event;
+    data->ssm = ssm;
+    data->state = state;
+    fpi_event_push_custom(ssm->dev, data, __fpi_ssm_thread);
+}
+
 
 
 /* SSM: sequential state machine
@@ -264,19 +205,27 @@ void fpi_thread_pool (gpointer event_data, gpointer user_data)
  * successful completion.
  */
 
-/* Allocate a new ssm */
-struct fpi_ssm *fpi_ssm_new(struct fp_dev *dev, ssm_handler_fn handler,
-	int nr_states)
+/* Allocate a new ssm with an abort handler */
+/* TODO: Mostly pointless. */
+struct fpi_ssm *fpi_ssm_new_a(struct fp_dev *dev, ssm_handler_fn handler,
+	ssm_abort_fn abort_fn, int nr_states)
 {
 	struct fpi_ssm *machine;
 	BUG_ON(nr_states < 1);
 
 	machine = g_malloc0(sizeof(*machine));
 	machine->handler = handler;
+	machine->abort_handler;
 	machine->nr_states = nr_states;
 	machine->dev = dev;
 	machine->completed = TRUE;
 	return machine;
+}
+/* Allocate a new ssm with an abort handler */
+struct fpi_ssm *fpi_ssm_new(struct fp_dev *dev, ssm_handler_fn handler,
+	int nr_states)
+{
+    return fpi_ssm_new_a(dev, handler, NULL, nr_states);
 }
 
 /* Free a ssm */
@@ -289,41 +238,17 @@ void fpi_ssm_free(struct fpi_ssm *machine)
 	g_free(machine);
 }
 
-/* Invoke the state handler */
-static void __ssm_call_handler(struct fpi_ssm *machine)
-{
-	machine->idle = FALSE;
-    if (machine->cancelling) {
-        fp_dbg("The SSM has been asked to abort, complying");
-        fpi_ssm_mark_completed(machine);
-        return;
-    }
-	fp_dbg("%p entering state %d", machine, machine->cur_state);
-    fpi_event_push(FPI_EVENT_SSM_CALL_HANDLER, machine);
-}
-
 /* Start a ssm. You can also restart a completed or aborted ssm. */
 void fpi_ssm_start(struct fpi_ssm *ssm, ssm_completed_fn callback)
 {
 	BUG_ON(!ssm->completed);
 	ssm->callback = callback;
-	ssm->cur_state = 0;
 	ssm->completed = FALSE;
 	ssm->error = 0;
-	__ssm_call_handler(ssm);
+	ssm->cur_state = 0;
+	fpi_ssm_jump_to_state(ssm, 0);
 }
 
-static void __subsm_complete(struct fpi_ssm *ssm)
-{
-	struct fpi_ssm *parent = ssm->parentsm;
-	BUG_ON(!parent);
-    ssm->parentsm->childsm = NULL;
-	if (ssm->error)
-		fpi_ssm_mark_aborted(parent, ssm->error);
-	else
-		fpi_ssm_next_state(parent);
-	fpi_ssm_free(ssm);
-}
 
 /* start a SSM as a child of another. if the child completes successfully, the
  * parent will be advanced to the next state. if the child aborts, the parent
@@ -337,83 +262,68 @@ void fpi_ssm_start_subsm(struct fpi_ssm *parent, struct fpi_ssm *child)
 	fpi_ssm_start(child, __subsm_complete);
 }
 
+/* The following must be thread-safe */
+
 /* Mark a ssm as completed successfully. */
 void fpi_ssm_mark_completed(struct fpi_ssm *machine)
 {
-    BUG_ON(machine->childsm);
-	BUG_ON(machine->completed);
-	machine->idle = FALSE;
-	machine->completed = TRUE;
-	fp_dbg("%p completed with status %d", machine, machine->error);
-	if (machine->callback)
-        fpi_event_push(FPI_EVENT_SSM_CALLBACK, machine);
+    __fpi_ssm_event_push(machine, FPI_SSM_MARK_COMPLETED, 0, 0);
 }
 
 /* Mark a ssm as aborted with error. */
 void fpi_ssm_mark_aborted(struct fpi_ssm *machine, int error)
 {
-    BUG_ON(machine->childsm);
-	fp_dbg("error %d from state %d", error, machine->cur_state);
-	BUG_ON(error == 0);
-	machine->error = error;
-	fpi_ssm_mark_completed(machine);
+    __fpi_ssm_event_push(machine, FPI_SSM_MARK_ABORTED, error, 0);
 }
 
 /* Iterate to next state of a ssm */
 void fpi_ssm_next_state(struct fpi_ssm *machine)
 {
-    BUG_ON(machine->childsm);
-	BUG_ON(machine->completed);
-	machine->cur_state++;
-	if (machine->cur_state == machine->nr_states) {
-		fpi_ssm_mark_completed(machine);
-	} else {
-		__ssm_call_handler(machine);
-	}
+    __fpi_ssm_event_push(machine, FPI_SSM_NEXT_STATE, 0, 0);
 }
 
 void fpi_ssm_jump_to_state(struct fpi_ssm *machine, int state)
 {
-    BUG_ON(machine->childsm);
-	BUG_ON(machine->completed);
-	BUG_ON(state >= machine->nr_states);
-	machine->cur_state = state;
-	__ssm_call_handler(machine);
+    __fpi_ssm_event_push(machine, FPI_SSM_JUMP_TO_STATE, 0, state);
 }
 
-void fpi_ssm_idle(struct fpi_ssm *ssm)
+void fpi_ssm_mark_idle(struct fpi_ssm *ssm)
 {
-    /* This is really bad programming */
-    ssm->idle = TRUE;
+    /* Not sure this is appropriate programming */
+    __fpi_ssm_event_push(ssm, FPI_SSM_MARK_IDLE, 0, 0);
 }
 
-/* This should be called to cancel the ssm from the outside.
+int fpi_ssm_get_current_state(struct fpi_ssm *ssm)
+{
+    return ssm->cur_state;
+}
+/* This should be called to cancel the ssm if the current thread is unknown.
  * This is the kill signal. Do not try to change the state from
  * the outside if you are not aware of the state.
  * Raceconditions makes it unknown when the ssm actually aborts. */
 void fpi_ssm_async_abort(struct fpi_ssm *ssm, int error)
 {
     BUG_ON(ssm->completed);
-    ssm->cancelling = TRUE;
-    ssm->error = error;     // Should not be needed if there is a child.
-    if(ssm->childsm)
+    if(ssm->childsm) {
+        fp_dbg("The SSM has been asynchronously asked to abort, passing on the task to the child...");
         fpi_ssm_async_abort(ssm->childsm, error);
-    else
-        if (ssm->idle) {
-            fp_dbg("The SSM (idle) has been asked to abort, complying");
-            fpi_ssm_mark_completed(ssm);
-        }
+    }
+    else {
+        fp_dbg("The SSM has been asynchronously asked to abort, passing on the task...");
+        __fpi_ssm_event_push(ssm, FPI_SSM_ASYNC_ABORT, error, 0);
+    }
 }
 
 void fpi_ssm_async_complete(struct fpi_ssm *ssm)
 {
     BUG_ON(ssm->completed);
-    ssm->cancelling = TRUE;
-    if(ssm->childsm)
+    if(ssm->childsm) {
+        fp_dbg("The SSM has been asynchronously asked to abort, passing on the task to the child...");
         fpi_ssm_async_complete(ssm->childsm);
-    else
-        if (ssm->idle) {
-            fp_dbg("The SSM (idle) has been asked to complete, complying");
-            fpi_ssm_mark_completed(ssm);
-        }
+    }
+    else {
+        fp_dbg("The SSM has been asynchronously asked to complete, passing on the task...");
+        __fpi_ssm_event_push(ssm, FPI_SSM_ASYNC_ABORT, 0, 0);
+    }
 }
+

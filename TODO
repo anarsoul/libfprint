@@ -17,6 +17,9 @@ LIBRARY
 * Use glib debugging
 * Make a convenient api that ties into glib applications main loop,
   not necessarily complete, focus on ease of use.
+* Use .h files in a correct way, only expose whats needed.
+  Make some structs opaque.
+* More exhausting error reporting.
 
 NEW DRIVERS
 ===========

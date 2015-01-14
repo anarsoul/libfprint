@@ -87,7 +87,7 @@ static int dev_change_state(struct fp_img_dev *imgdev,
     fp_dbg("Change state to %d", state);
 	if (!imgdrv->change_state)
 		return 0;   // TODO: Doesn't we need to call change_state or have a work-around?
-	return imgdrv->change_state(imgdev, state);
+	return imgdrv->change_state(imgdev, state); // TODO: Any returned error is not handled.
 }
 
 /* check image properties and resize it if necessary. potentially returns a new
@@ -124,14 +124,17 @@ void fpi_imgdev_report_finger_status(struct fp_img_dev *imgdev,
 	gboolean present)
 {
 	int r = imgdev->action_result;
+	int scr;
 	struct fp_print_data *data = imgdev->acquire_data;
 	struct fp_img *img = imgdev->acquire_img;
 
 	fp_dbg(present ? "finger on sensor" : "finger removed");
 
 	if (present && imgdev->action_state == IMG_ACQUIRE_STATE_AWAIT_FINGER_ON) {
-		dev_change_state(imgdev, IMGDEV_STATE_CAPTURE);
 		imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_IMAGE;
+		scr = dev_change_state(imgdev, IMGDEV_STATE_CAPTURE);
+        if (scr)
+            fpi_imgdev_session_error(imgdev, scr);
 		return;
 	} else if (present
 			|| imgdev->action_state != IMG_ACQUIRE_STATE_AWAIT_FINGER_OFF) {
@@ -161,7 +164,9 @@ void fpi_imgdev_report_finger_status(struct fp_img_dev *imgdev,
 		    r > 0 && r != FP_ENROLL_COMPLETE && r != FP_ENROLL_FAIL) {
 			imgdev->action_result = 0;
 			imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_ON;
-			dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+			scr = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+            if (scr)
+                fpi_imgdev_session_error(imgdev, scr);
 		}
 		break;
 	case IMG_ACTION_VERIFY:
@@ -173,7 +178,9 @@ void fpi_imgdev_report_finger_status(struct fp_img_dev *imgdev,
             if (imgdev->action_state != IMG_ACQUIRE_STATE_DEACTIVATING) {
                 imgdev->action_result = 0;
                 imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_ON;
-                dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+                scr = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+                if (scr)
+                    fpi_imgdev_session_error(imgdev, scr);
             }
 
         }
@@ -188,7 +195,9 @@ void fpi_imgdev_report_finger_status(struct fp_img_dev *imgdev,
             if (imgdev->action_state != IMG_ACQUIRE_STATE_DEACTIVATING) {
                 imgdev->action_result = 0;
                 imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_ON;
-                dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+                scr = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+                if (scr)
+                    fpi_imgdev_session_error(imgdev, scr);
             }
        }
 		break;
@@ -315,7 +324,9 @@ void fpi_imgdev_image_captured(struct fp_img_dev *imgdev, struct fp_img *img)
 
 next_state:
 	imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_OFF;
-	dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_OFF);
+	r = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_OFF);
+	if (r)
+        fpi_imgdev_session_error(imgdev, r);
 }
 
 void fpi_imgdev_session_error(struct fp_img_dev *imgdev, int error)
@@ -424,8 +435,10 @@ static int dev_activate(struct fp_img_dev *imgdev, enum fp_imgdev_state state)
 	struct fp_driver *drv = imgdev->dev->drv;
 	struct fp_img_driver *imgdrv = fpi_driver_to_img_driver(drv);
 
-	if (!imgdrv->activate)
+	if (!imgdrv->activate) {
+        fpi_imgdev_activate_complete(imgdev, state);
 		return 0;
+	}
 	return imgdrv->activate(imgdev, state);
 }
 
@@ -435,7 +448,7 @@ static void dev_deactivate(struct fp_img_dev *imgdev)
 	struct fp_img_driver *imgdrv = fpi_driver_to_img_driver(drv);
 
 	if (!imgdrv->deactivate)
-		return;
+		return fpi_imgdev_deactivate_complete(imgdev);
 	return imgdrv->deactivate(imgdev);
 }
 
@@ -460,6 +473,7 @@ static void generic_acquire_stop(struct fp_img_dev *imgdev)
 {
 	imgdev->action_state = IMG_ACQUIRE_STATE_DEACTIVATING;
 	dev_deactivate(imgdev);
+	dev_change_state(imgdev, IMGDEV_STATE_INACTIVE);
 
 	fp_print_data_free(imgdev->acquire_data);
 	fp_print_data_free(imgdev->enroll_data);

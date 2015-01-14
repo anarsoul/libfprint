@@ -204,11 +204,11 @@ static void usbexchange_loop(struct fpi_ssm *ssm)
 {
 	struct usbexchange_data *data = (struct usbexchange_data *)ssm->priv;
 	struct vfs5011_data *dev = (struct vfs5011_data *)data->device->priv;
-	/*if (dev->deactivating) {
+	if (dev->deactivating) {
         fp_dbg("Deactivating");
         fpi_ssm_mark_completed(ssm);
         return;
-	}*/
+	}
 	if (ssm->cur_state >= data->stepcount) {
 		fp_err("Bug detected: state %d out of range, only %d steps",
 				ssm->cur_state, data->stepcount);
@@ -462,9 +462,9 @@ enum {
 	DEV_ACTIVATE_FINGER_ON,
 	DEV_ACTIVATE_READ_DATA,
 	DEV_ACTIVATE_DATA_COMPLETE,
-	DEV_ACTIVATE_AWAIT_FINGER_OFF,
+	DEV_ACTIVATE_FINGER_OFF,
 	DEV_ACTIVATE_PREPARE_NEXT_CAPTURE,
-	DEV_ACTIVATE_DEACTIVATE,
+	DEV_ACTIVATE_IDLE,
 	DEV_ACTIVATE_NUM_STATES
 };
 
@@ -492,7 +492,7 @@ static void capture_init(struct vfs5011_data *data, int max_captured,
 static int process_chunk(struct vfs5011_data *data, int transferred)
 {
 	enum {
-		DEVIATION_THRESHOLD = 500,
+		DEVIATION_THRESHOLD = 1000,
 		DIFFERENCE_THRESHOLD = 600,
 		STOP_CHECK_LINES = 50
 	};
@@ -507,9 +507,9 @@ static int process_chunk(struct vfs5011_data *data, int transferred)
 		unsigned char *linebuf = data->capture_buffer
 					 + i * VFS5011_LINE_SIZE;
         deviation = get_deviation(linebuf + 8, VFS5011_IMAGE_WIDTH);
-        #ifdef ENABLE_DEBUG_LOGGING
+        /*#ifdef ENABLE_DEBUG_LOGGING
         g_print("%d ", deviation);
-        #endif
+        #endif*/
 		if (deviation < DEVIATION_THRESHOLD) {
 			if (data->lines_captured == 0)
                 continue;
@@ -844,11 +844,12 @@ static void activate_loop(struct fpi_ssm *ssm)
 
 	fp_dbg("main_loop: state %d", ssm->cur_state);
 
-    /*if (data->deactivating) {
+    if (data->deactivating) {
         fp_dbg("deactivating, marking completed");
         fpi_ssm_mark_completed(ssm);
         return;
-    }*/
+    }
+
 	switch (ssm->cur_state) {
 	case DEV_ACTIVATE_REQUEST_FPRINT:
         data->init_sequence.stepcount =
@@ -864,11 +865,10 @@ static void activate_loop(struct fpi_ssm *ssm)
 
 	case DEV_ACTIVATE_INIT_COMPLETE:
 		capture_init(data, MAX_CAPTURE_LINES, MAXLINES);
-		// ??? if (dev->dev->state == DEV_STATE_VERIFY_STARTING)
         if (dev->action_state == IMG_ACQUIRE_STATE_AWAIT_FINGER_ON)
             fpi_ssm_next_state(ssm);
         else {
-            fpi_ssm_idle(ssm);
+            //fpi_ssm_idle(ssm);
             fpi_imgdev_activate_complete(dev, 0);
         }
 		break;
@@ -884,7 +884,7 @@ static void activate_loop(struct fpi_ssm *ssm)
 		break;
 
     case DEV_ACTIVATE_FINGER_ON:
-        fpi_ssm_idle(ssm);
+        //fpi_ssm_idle(ssm);
         fpi_imgdev_report_finger_status(dev, TRUE);
         break;
 
@@ -899,37 +899,20 @@ static void activate_loop(struct fpi_ssm *ssm)
 		break;
 
 	case DEV_ACTIVATE_DATA_COMPLETE:
-		/*timeout = fpi_timeout_add(1, async_sleep_cb, ssm);
-
-		if (timeout == NULL) {
-			// Failed to add timeout
-			fp_err("failed to add timeout");
-			fpi_imgdev_session_error(dev, -1);
-			fpi_ssm_mark_aborted(ssm, -1);
-		}*/
-        submit_image(ssm, data);
+       submit_image(ssm, data);
 		break;
 
-    case DEV_ACTIVATE_AWAIT_FINGER_OFF:
-        fpi_ssm_idle(ssm);
+    case DEV_ACTIVATE_FINGER_OFF:
+        //fpi_ssm_idle(ssm);
         fpi_imgdev_report_finger_status(dev, FALSE);
 		break;
 
 	case DEV_ACTIVATE_PREPARE_NEXT_CAPTURE:
-		/*data->init_sequence.stepcount =
-			array_n_elements(vfs5011_initiate_capture);
-		data->init_sequence.actions = vfs5011_initiate_capture;
-		data->init_sequence.device = dev;
-		if (data->init_sequence.receive_buf == NULL)
-			data->init_sequence.receive_buf =
-				g_malloc0(VFS5011_RECEIVE_BUF_SIZE);
-		data->init_sequence.timeout = VFS5011_DEFAULT_WAIT_TIMEOUT;
-		usb_exchange_async(ssm, &data->init_sequence);*/
 		fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_REQUEST_FPRINT);
 		break;
 
-    case DEV_ACTIVATE_DEACTIVATE:
-        fpi_ssm_mark_completed(ssm);
+    case DEV_ACTIVATE_IDLE:
+        // Probably never will be used.
         break;
 
 	}
@@ -982,6 +965,7 @@ static void open_loop_complete(struct fpi_ssm *ssm)
 	g_free(data->init_sequence.receive_buf);
 	data->init_sequence.receive_buf = NULL;
 
+	fp_dbg("device initialized");
 	fpi_imgdev_open_complete(dev, 0);
 	fpi_ssm_free(ssm);
 }
@@ -1000,8 +984,6 @@ static int dev_open(struct fp_img_dev *dev, unsigned long driver_data)
 	data->rescale_buffer =
 		(unsigned char *)g_malloc0(MAXLINES * VFS5011_IMAGE_WIDTH);
 	dev->priv = data;
-
-	// dev->dev->nr_enroll_stages = 1;
 
 	r = libusb_reset_device(dev->udev);
 	if (r != 0) {
@@ -1042,17 +1024,14 @@ static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
 	struct vfs5011_data *data = (struct vfs5011_data *)dev->priv;
 	struct fpi_ssm *ssm;
 
-	fp_dbg("device initialized");
 	data->deactivating = FALSE;
 	data->loop_running = TRUE;
 
-	fp_dbg("creating ssm");
 	ssm = fpi_ssm_new(dev->dev, activate_loop, DEV_ACTIVATE_NUM_STATES);
 	ssm->priv = dev;
 	data->ssm = ssm;
 	fp_dbg("starting ssm");
 	fpi_ssm_start(ssm, activate_loop_complete);
-	fp_dbg("ssm done, getting out");
 
 	return 0;
 }
@@ -1063,7 +1042,7 @@ static void dev_deactivate(struct fp_img_dev *dev)
 	if (data->loop_running)
     {
 		data->deactivating = TRUE;      // TODO: This might cause minor race issues.
-        fpi_ssm_async_complete(data->ssm);
+        //fpi_ssm_async_complete(data->ssm);
 		//fpi_ssm_jump_to_state(data->ssm, DEV_ACTIVATE_DEACTIVATE); // TODO: Raise priority.
     }
 	else
@@ -1073,43 +1052,56 @@ static void dev_deactivate(struct fp_img_dev *dev)
 static int dev_change_state(struct fp_img_dev *dev, enum fp_imgdev_state state)
 {
 	struct vfs5011_data *data = (struct vfs5011_data *)dev->priv;
+	int cur_state = fpi_ssm_get_current_state(data->ssm);
 	fp_dbg("State = %d", state);
 	switch (state)
 	{
 	case IMGDEV_STATE_INACTIVE:
-        break;
+	    if (cur_state == DEV_ACTIVATE_FINGER_OFF ||
+            cur_state == DEV_ACTIVATE_FINGER_OFF ||
+            cur_state == DEV_ACTIVATE_INIT_COMPLETE ||
+            cur_state == DEV_ACTIVATE_DATA_COMPLETE ||
+            cur_state == DEV_ACTIVATE_IDLE
+        ) {
+            fpi_ssm_jump_to_state(data->ssm, DEV_ACTIVATE_IDLE);
+            fp_dbg("Inactive");
+            break;
+	    }
+        fp_err("Device is busy");
+        return -1;
+
 	case IMGDEV_STATE_AWAIT_FINGER_ON:
-	    if (data->ssm->cur_state == DEV_ACTIVATE_REQUEST_FPRINT) {
+	    if (cur_state == DEV_ACTIVATE_REQUEST_FPRINT) {
             fp_dbg("Device is initializing, will continue");
             break;
 	    }
-	    if (data->ssm->cur_state == DEV_ACTIVATE_AWAIT_FINGER_OFF) {
+	    if (cur_state == DEV_ACTIVATE_FINGER_OFF) {
+            fp_dbg("Device is initializing, will continue");
             fpi_ssm_jump_to_state(data->ssm, DEV_ACTIVATE_REQUEST_FPRINT);
-            fp_dbg("Device is initializing, will continue");
             break;
 	    }
-	    if (data->ssm->cur_state != DEV_ACTIVATE_INIT_COMPLETE) {
-            fp_err("Device not initialized");
-            return -1;
+	    if (cur_state == DEV_ACTIVATE_INIT_COMPLETE) {
+            fpi_ssm_next_state(data->ssm);
+            break;
 	    }
-		fpi_ssm_next_state(data->ssm);
-        break;
+        fp_err("Device not initialized");
+        return -1;
+
 	case IMGDEV_STATE_CAPTURE:
-	    if (data->ssm->cur_state != DEV_ACTIVATE_FINGER_ON) {
-            fp_err("Device not ready for capture");
-            return -1;
+	    if (cur_state == DEV_ACTIVATE_FINGER_ON) {
+            fpi_ssm_next_state(data->ssm);
+            break;
 	    }
-		fpi_ssm_next_state(data->ssm);
-        break;
+        fp_err("Device not ready for capture");
+        return -1;
+
 	case IMGDEV_STATE_AWAIT_FINGER_OFF:
-	    if (data->ssm->cur_state != DEV_ACTIVATE_DATA_COMPLETE) {
-            fp_err("Device has not read data");
-            return -1;
+	    if (cur_state == DEV_ACTIVATE_DATA_COMPLETE) {
+            fpi_ssm_next_state(data->ssm);
+            break;
 	    }
-		fpi_ssm_next_state(data->ssm);
-		//fpi_ssm_jump_to_state(data->ssm, DEV_ACTIVATE_REQUEST_FPRINT);
-		//fpi_imgdev_report_finger_status(dev, FALSE);
-        break;
+        fp_err("Device has not read data");
+        return -1;
 	}
 
 	return 0;

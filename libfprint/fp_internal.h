@@ -103,6 +103,7 @@ struct fp_dev {
 	struct fp_driver *drv;
 	libusb_device_handle *udev;
 	uint32_t devtype;
+    GThreadPool *thread_pool;
 	void *priv;
 
 	int nr_enroll_stages;
@@ -418,42 +419,18 @@ struct fpi_timeout *fpi_timeout_add(unsigned int msec, fpi_timeout_fn callback,
 void fpi_timeout_cancel(struct fpi_timeout *timeout);
 
 /* async drv <--> lib comms */
-
-enum fpi_event
-{
-    FP_ASYNC_DEV_OPEN,
-    FP_ASYNC_DEV_CLOSE,
-    FP_ASYNC_ENROLL_START,
-    FP_ASYNC_ENROLL_STOP,
-    FP_ASYNC_VERIFY_START,
-    FP_ASYNC_VERIFY_STOP,
-    FP_ASYNC_IDENTIFY_START,
-    FP_ASYNC_IDENTIFY_STOP,
-    FP_ASYNC_CAPTURE_START,
-    FP_ASYNC_CAPTURE_STOP,
-
-    FPI_EVENT_SSM_CALL_HANDLER,
-    FPI_EVENT_SSM_CALLBACK,
-};
-struct fpi_event_data
-{
-    enum fpi_event event;
-    gpointer data;
-    gpointer user_data;
-    gconstpointer callback;
-};
-GThreadPool *thread_pool;
-int fpi_event_push(enum fpi_event, gpointer data);
-//int fpi_event_push(enum fpi_event, gpointer data, gpointer user_data, gconstpointer callback);
-void fpi_thread_pool (gpointer event_data, gpointer user_data);
 struct fpi_ssm;
+typedef void (*fpi_event_custom)(struct fp_dev *dev, gpointer user_data);
+
+int fpi_event_push_custom(struct fp_dev *dev, gpointer user_data, fpi_event_custom function);
 typedef void (*ssm_completed_fn)(struct fpi_ssm *ssm);
 typedef void (*ssm_handler_fn)(struct fpi_ssm *ssm);
+typedef void (*ssm_abort_fn)(struct fpi_ssm *ssm, int error);
 
 /* sequential state machine: state machine that iterates sequentially over
  * a predefined series of states. can be aborted by either completion or
  * abortion error conditions. */
-struct fpi_ssm {
+struct fpi_ssm {    // TODO: This should be made opaque to drivers.
 	struct fp_dev *dev;
 	struct fpi_ssm *parentsm;
 	struct fpi_ssm *childsm;
@@ -466,8 +443,8 @@ struct fpi_ssm {
 	gboolean cancelling;
 	ssm_completed_fn callback;
 	ssm_handler_fn handler;
+	ssm_abort_fn abort_handler;
 };
-
 
 /* for library and drivers */
 struct fpi_ssm *fpi_ssm_new(struct fp_dev *dev, ssm_handler_fn handler,
@@ -475,16 +452,18 @@ struct fpi_ssm *fpi_ssm_new(struct fp_dev *dev, ssm_handler_fn handler,
 void fpi_ssm_free(struct fpi_ssm *machine);
 void fpi_ssm_start(struct fpi_ssm *machine, ssm_completed_fn callback);
 void fpi_ssm_start_subsm(struct fpi_ssm *parent, struct fpi_ssm *child);
-int fpi_ssm_has_completed(struct fpi_ssm *machine);     // TODO: not implemented
-void fpi_ssm_async_abort(struct fpi_ssm *ssm, int error);
-void fpi_ssm_async_complete(struct fpi_ssm *ssm);
 
-/* for drivers */
-void fpi_ssm_idle(struct fpi_ssm *ssm);
+/* for drivers
+ * Should be thread safe. */
 void fpi_ssm_next_state(struct fpi_ssm *machine);
 void fpi_ssm_jump_to_state(struct fpi_ssm *machine, int state);
+int fpi_ssm_has_completed(struct fpi_ssm *machine);     // TODO: not implemented
 void fpi_ssm_mark_completed(struct fpi_ssm *machine);
 void fpi_ssm_mark_aborted(struct fpi_ssm *machine, int error);
+void fpi_ssm_mark_idle(struct fpi_ssm *ssm);
+int fpi_ssm_get_current_state(struct fpi_ssm *ssm);
+void fpi_ssm_async_abort(struct fpi_ssm *ssm, int error);
+void fpi_ssm_async_complete(struct fpi_ssm *ssm);
 
 void fpi_drvcb_open_complete(struct fp_dev *dev, int status);
 void fpi_drvcb_close_complete(struct fp_dev *dev);

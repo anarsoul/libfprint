@@ -321,12 +321,13 @@ void fpi_log(enum fpi_log_level level, const char *component,
 		break;
 	}
 
-    time = g_get_monotonic_time();
+    time = g_get_monotonic_time();      // TODO: Is there a better way to get elapsed time since execution start?
     gint64 elapsed = time - starttime;
     gint32 elapsed_usec = elapsed % 1000000;
     gint32 elapsed_sec = elapsed / 1000000;
-	fprintf(stream, "[%d.%06d] %s:%s [%s] ", elapsed_sec, elapsed_usec, component ? component : "fp", prefix,
-		function);
+    GThread *thread = g_thread_self();   // TODO: Is this a reliable way to get the identity of the thread?
+	fprintf(stream, "[%d.%06d]Th:%p %s:%s [%s] ", elapsed_sec, elapsed_usec, thread,
+         component ? component : "fp", prefix, function);
 
 	va_start (args, format);
 	vfprintf(stream, format, args);
