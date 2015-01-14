@@ -1,6 +1,7 @@
 /*
  * Core imaging device functions for libfprint
  * Copyright (C) 2007-2008 Daniel Drake <dsd@gentoo.org>
+ * Copyright (C) 2015 Per-Ola Gustavsson <pelle@marsba.se>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -21,6 +22,7 @@
 
 #include <glib.h>
 
+#define FP_COMPONENT "imgdev"
 #include "fp_internal.h"
 
 #define MIN_ACCEPTABLE_MINUTIAE 10
@@ -82,10 +84,10 @@ static int dev_change_state(struct fp_img_dev *imgdev,
 {
 	struct fp_driver *drv = imgdev->dev->drv;
 	struct fp_img_driver *imgdrv = fpi_driver_to_img_driver(drv);
-
+    fp_dbg("Change state to %d", state);
 	if (!imgdrv->change_state)
-		return 0;
-	return imgdrv->change_state(imgdev, state);
+		return 0;   // TODO: Doesn't we need to call change_state or have a work-around?
+	return imgdrv->change_state(imgdev, state); // TODO: Any returned error is not handled.
 }
 
 /* check image properties and resize it if necessary. potentially returns a new
@@ -107,7 +109,7 @@ static int sanitize_image(struct fp_img_dev *imgdev, struct fp_img **_img)
 		img->height = imgdrv->img_height;
 	} else if (img->height <= 0) {
 		fp_err("no image height assigned");
-		return -EINVAL;
+		return FP_ENROLL_RETRY; // Changed from: -EINVAL;
 	}
 
 	if (!fpi_img_is_sane(img)) {
@@ -122,14 +124,17 @@ void fpi_imgdev_report_finger_status(struct fp_img_dev *imgdev,
 	gboolean present)
 {
 	int r = imgdev->action_result;
+	int scr;
 	struct fp_print_data *data = imgdev->acquire_data;
 	struct fp_img *img = imgdev->acquire_img;
 
 	fp_dbg(present ? "finger on sensor" : "finger removed");
 
 	if (present && imgdev->action_state == IMG_ACQUIRE_STATE_AWAIT_FINGER_ON) {
-		dev_change_state(imgdev, IMGDEV_STATE_CAPTURE);
 		imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_IMAGE;
+		scr = dev_change_state(imgdev, IMGDEV_STATE_CAPTURE);
+        if (scr)
+            fpi_imgdev_session_error(imgdev, scr);
 		return;
 	} else if (present
 			|| imgdev->action_state != IMG_ACQUIRE_STATE_AWAIT_FINGER_OFF) {
@@ -159,20 +164,45 @@ void fpi_imgdev_report_finger_status(struct fp_img_dev *imgdev,
 		    r > 0 && r != FP_ENROLL_COMPLETE && r != FP_ENROLL_FAIL) {
 			imgdev->action_result = 0;
 			imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_ON;
-			dev_change_state(imgdev, IMG_ACQUIRE_STATE_AWAIT_FINGER_ON);
+			scr = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+            if (scr)
+                fpi_imgdev_session_error(imgdev, scr);
 		}
 		break;
 	case IMG_ACTION_VERIFY:
 		fpi_drvcb_report_verify_result(imgdev->dev, r, img);
 		fp_print_data_free(data);
+		if(r >= FP_VERIFY_RETRY)
+        {
+            //r = fpi_event_push(FP_ASYNC_VERIFY_START, imgdev->dev); // TODO: Might not be a good idea.
+            if (imgdev->action_state != IMG_ACQUIRE_STATE_DEACTIVATING) {
+                imgdev->action_result = 0;
+                imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_ON;
+                scr = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+                if (scr)
+                    fpi_imgdev_session_error(imgdev, scr);
+            }
+
+        }
 		break;
 	case IMG_ACTION_IDENTIFY:
 		fpi_drvcb_report_identify_result(imgdev->dev, r,
 			imgdev->identify_match_offset, img);
 		fp_print_data_free(data);
+		if(r >= FP_VERIFY_RETRY)
+        {
+            //r = fpi_event_push(FP_ASYNC_IDENTIFY_START, imgdev->dev); // TODO: Might not be a good idea.
+            if (imgdev->action_state != IMG_ACQUIRE_STATE_DEACTIVATING) {
+                imgdev->action_result = 0;
+                imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_ON;
+                scr = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+                if (scr)
+                    fpi_imgdev_session_error(imgdev, scr);
+            }
+       }
 		break;
 	case IMG_ACTION_CAPTURE:
-		fpi_drvcb_report_capture_result(imgdev->dev, r, img);
+		fpi_drvcb_report_capture_result(imgdev->dev, r, img); // TODO free?
 		break;
 	default:
 		fp_err("unhandled action %d", imgdev->action);
@@ -294,7 +324,9 @@ void fpi_imgdev_image_captured(struct fp_img_dev *imgdev, struct fp_img *img)
 
 next_state:
 	imgdev->action_state = IMG_ACQUIRE_STATE_AWAIT_FINGER_OFF;
-	dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_OFF);
+	r = dev_change_state(imgdev, IMGDEV_STATE_AWAIT_FINGER_OFF);
+	if (r)
+        fpi_imgdev_session_error(imgdev, r);
 }
 
 void fpi_imgdev_session_error(struct fp_img_dev *imgdev, int error)
@@ -403,8 +435,10 @@ static int dev_activate(struct fp_img_dev *imgdev, enum fp_imgdev_state state)
 	struct fp_driver *drv = imgdev->dev->drv;
 	struct fp_img_driver *imgdrv = fpi_driver_to_img_driver(drv);
 
-	if (!imgdrv->activate)
+	if (!imgdrv->activate) {
+        fpi_imgdev_activate_complete(imgdev, state);
 		return 0;
+	}
 	return imgdrv->activate(imgdev, state);
 }
 
@@ -414,7 +448,7 @@ static void dev_deactivate(struct fp_img_dev *imgdev)
 	struct fp_img_driver *imgdrv = fpi_driver_to_img_driver(drv);
 
 	if (!imgdrv->deactivate)
-		return;
+		return fpi_imgdev_deactivate_complete(imgdev);
 	return imgdrv->deactivate(imgdev);
 }
 
@@ -427,7 +461,7 @@ static int generic_acquire_start(struct fp_dev *dev, int action)
 	imgdev->action_state = IMG_ACQUIRE_STATE_ACTIVATING;
 	imgdev->enroll_stage = 0;
 
-	r = dev_activate(imgdev, IMGDEV_STATE_AWAIT_FINGER_ON);
+	r = dev_activate(imgdev, IMGDEV_STATE_INACTIVE); // Was _AWAIT_FINGER_ON but that action is sent later using dev_change_state()
 	if (r < 0)
 		fp_err("activation failed with error %d", r);
 
@@ -439,6 +473,7 @@ static void generic_acquire_stop(struct fp_img_dev *imgdev)
 {
 	imgdev->action_state = IMG_ACQUIRE_STATE_DEACTIVATING;
 	dev_deactivate(imgdev);
+	dev_change_state(imgdev, IMGDEV_STATE_INACTIVE);
 
 	fp_print_data_free(imgdev->acquire_data);
 	fp_print_data_free(imgdev->enroll_data);

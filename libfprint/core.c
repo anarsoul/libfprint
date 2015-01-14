@@ -25,11 +25,12 @@
 #include <glib.h>
 #include <libusb.h>
 
+#define FP_COMPONENT "core"
 #include "fp_internal.h"
 
 static int log_level = 0;
 static int log_level_fixed = 0;
-
+gint64 starttime;
 libusb_context *fpi_usb_ctx = NULL;
 GSList *opened_devices = NULL;
 
@@ -69,7 +70,7 @@ GSList *opened_devices = NULL;
  *
  * Verification is what most people think of when they think about fingerprint
  * scanning. The process of verification is effectively performing a fresh
- * fingerprint scan, and then comparing that scan to a finger that was 
+ * fingerprint scan, and then comparing that scan to a finger that was
  * previously enrolled.
  *
  * As an example scenario, verification can be used to implement what people
@@ -287,6 +288,7 @@ void fpi_log(enum fpi_log_level level, const char *component,
 	va_list args;
 	FILE *stream = stdout;
 	const char *prefix;
+	gint64 time;
 
 #ifndef ENABLE_DEBUG_LOGGING
 	if (!log_level)
@@ -319,8 +321,13 @@ void fpi_log(enum fpi_log_level level, const char *component,
 		break;
 	}
 
-	fprintf(stream, "%s:%s [%s] ", component ? component : "fp", prefix,
-		function);
+    time = g_get_monotonic_time();      // TODO: Is there a better way to get elapsed time since execution start?
+    gint64 elapsed = time - starttime;
+    gint32 elapsed_usec = elapsed % 1000000;
+    gint32 elapsed_sec = elapsed / 1000000;
+    GThread *thread = g_thread_self();   // TODO: Is this a reliable way to get the identity of the thread?
+	fprintf(stream, "[%d.%06d]Th:%p %s:%s [%s] ", elapsed_sec, elapsed_usec, thread,
+         component ? component : "fp", prefix, function);
 
 	va_start (args, format);
 	vfprintf(stream, format, args);
@@ -917,6 +924,7 @@ API_EXPORTED int fp_init(void)
 	int r;
 	fp_dbg("");
 
+    starttime = g_get_monotonic_time();
 	r = libusb_init(&fpi_usb_ctx);
 	if (r < 0)
 		return r;

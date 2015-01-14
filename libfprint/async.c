@@ -1,6 +1,7 @@
 /*
  * Asynchronous I/O functionality
  * Copyright (C) 2008 Daniel Drake <dsd@gentoo.org>
+ * Copyright (C) 2015 Per-Ola Gustavsson <pelle@marsba.se>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -25,13 +26,35 @@
 
 #include "fp_internal.h"
 
+enum fpi_event
+{
+    FPI_EVENT_CUSTOM,
+    FP_ASYNC_DEV_OPEN,
+    FP_ASYNC_DEV_CLOSE,
+    FP_ASYNC_ENROLL_START,
+    FP_ASYNC_ENROLL_STOP,
+    FP_ASYNC_VERIFY_START,
+    FP_ASYNC_VERIFY_STOP,
+    FP_ASYNC_IDENTIFY_START,
+    FP_ASYNC_IDENTIFY_STOP,
+    FP_ASYNC_CAPTURE_START,
+    FP_ASYNC_CAPTURE_STOP,
+
+    FPI_EVENT_SSM_CALL_HANDLER,
+    FPI_EVENT_SSM_CALLBACK,
+    FPI_EVENT_SSM,
+};
+int fpi_event_push(enum fpi_event, struct fp_dev *dev);
+
+
 /* Drivers call this when device initialisation has completed */
 void fpi_drvcb_open_complete(struct fp_dev *dev, int status)
 {
 	fp_dbg("status %d", status);
 	BUG_ON(dev->state != DEV_STATE_INITIALIZING);
 	dev->state = (status) ? DEV_STATE_ERROR : DEV_STATE_INITIALIZED;
-	opened_devices = g_slist_prepend(opened_devices, dev);
+	if (!g_slist_find(opened_devices, dev))
+        opened_devices = g_slist_prepend(opened_devices, dev);
 	if (dev->open_cb)
 		dev->open_cb(dev, status, dev->open_cb_data);
 }
@@ -45,10 +68,23 @@ API_EXPORTED int fp_async_dev_open(struct fp_dscv_dev *ddev, fp_dev_open_cb cb,
 	int r;
 
 	fp_dbg("");
+
 	r = libusb_open(ddev->udev, &udevh);
 	if (r < 0) {
-		fp_err("usb_open failed, error %d", r);
-		return r;
+		fp_err("usb_open failed, error %d, trying usb_init", r);
+        libusb_exit(fpi_usb_ctx);
+        r = libusb_init(&fpi_usb_ctx);
+        if (r < 0) {
+            fp_err("usb_init failed, error %d", r);
+            return r;
+        }
+        else {
+            r = libusb_open(ddev->udev, &udevh);
+            if (r < 0) {
+                fp_err("usb_open failed, error %d, giving up", r);
+                return r;
+            }
+        }
 	}
 
 	dev = g_malloc0(sizeof(*dev));
@@ -58,14 +94,9 @@ API_EXPORTED int fp_async_dev_open(struct fp_dscv_dev *ddev, fp_dev_open_cb cb,
 	dev->state = DEV_STATE_INITIALIZING;
 	dev->open_cb = cb;
 	dev->open_cb_data = user_data;
+	dev->driver_data = ddev->driver_data;
 
-	if (!drv->open) {
-		fpi_drvcb_open_complete(dev, 0);
-		return 0;
-	}
-
-	dev->state = DEV_STATE_INITIALIZING;
-	r = drv->open(dev, ddev->driver_data);
+	r = fpi_event_push(FP_ASYNC_DEV_OPEN, dev);
 	if (r) {
 		fp_err("device initialisation failed, driver=%s", drv->name);
 		libusb_close(udevh);
@@ -82,6 +113,9 @@ void fpi_drvcb_close_complete(struct fp_dev *dev)
 	BUG_ON(dev->state != DEV_STATE_DEINITIALIZING);
 	dev->state = DEV_STATE_DEINITIALIZED;
 	libusb_close(dev->udev);
+    g_thread_pool_free(dev->thread_pool, FALSE, FALSE);
+    dev->thread_pool = NULL;     // TODO: Not really thread safe.
+	opened_devices = g_slist_remove(opened_devices, (gconstpointer) dev);
 	if (dev->close_cb)
 		dev->close_cb(dev, dev->close_cb_data);
 	g_free(dev);
@@ -90,22 +124,13 @@ void fpi_drvcb_close_complete(struct fp_dev *dev)
 API_EXPORTED void fp_async_dev_close(struct fp_dev *dev,
 	fp_dev_close_cb callback, void *user_data)
 {
-	struct fp_driver *drv = dev->drv;
-
 	if (g_slist_index(opened_devices, (gconstpointer) dev) == -1)
 		fp_err("device %p not in opened list!", dev);
-	opened_devices = g_slist_remove(opened_devices, (gconstpointer) dev);
 
 	dev->close_cb = callback;
 	dev->close_cb_data = user_data;
 
-	if (!drv->close) {
-		fpi_drvcb_close_complete(dev);
-		return;
-	}
-
-	dev->state = DEV_STATE_DEINITIALIZING;
-	drv->close(dev);
+    fpi_event_push(FP_ASYNC_DEV_CLOSE, dev);
 }
 
 /* Drivers call this when enrollment has started */
@@ -142,15 +167,9 @@ API_EXPORTED int fp_async_enroll_start(struct fp_dev *dev,
 	fp_dbg("starting enrollment");
 	dev->enroll_stage_cb = callback;
 	dev->enroll_stage_cb_data = user_data;
-
 	dev->state = DEV_STATE_ENROLL_STARTING;
-	r = drv->enroll_start(dev);
-	if (r < 0) {
-		dev->enroll_stage_cb = NULL;
-		fp_err("failed to start enrollment");
-		dev->state = DEV_STATE_ERROR;
-	}
 
+    r = fpi_event_push(FP_ASYNC_ENROLL_START, dev);
 	return r;
 }
 
@@ -196,17 +215,7 @@ API_EXPORTED int fp_async_enroll_stop(struct fp_dev *dev,
 	dev->enroll_stop_cb_data = user_data;
 	dev->state = DEV_STATE_ENROLL_STOPPING;
 
-	if (!drv->enroll_stop) {
-		fpi_drvcb_enroll_stopped(dev);
-		return 0;
-	}
-
-	r = drv->enroll_stop(dev);
-	if (r < 0) {
-		fp_err("failed to stop enrollment");
-		dev->enroll_stop_cb = NULL;
-	}
-
+    r = fpi_event_push(FP_ASYNC_ENROLL_STOP, dev);
 	return r;
 }
 
@@ -225,12 +234,7 @@ API_EXPORTED int fp_async_verify_start(struct fp_dev *dev,
 	dev->verify_cb_data = user_data;
 	dev->verify_data = data;
 
-	r = drv->verify_start(dev);
-	if (r < 0) {
-		dev->verify_cb = NULL;
-		dev->state = DEV_STATE_ERROR;
-		fp_err("failed to start verification, error %d", r);
-	}
+    r = fpi_event_push(FP_ASYNC_VERIFY_START, dev);
 	return r;
 }
 
@@ -245,7 +249,7 @@ void fpi_drvcb_verify_started(struct fp_dev *dev, int status)
 			fp_dbg("adjusted to %d", status);
 		}
 		dev->state = DEV_STATE_ERROR;
-		if (dev->verify_cb)
+		if (dev->verify_cb) // TODO: Maybe do some cleaning if not successful?
 			dev->verify_cb(dev, status, NULL, dev->verify_cb_data);
 	} else {
 		dev->state = DEV_STATE_VERIFYING;
@@ -282,7 +286,6 @@ API_EXPORTED int fp_async_verify_stop(struct fp_dev *dev,
 	fp_verify_stop_cb callback, void *user_data)
 {
 	struct fp_driver *drv = dev->drv;
-	gboolean iterating = (dev->state == DEV_STATE_VERIFYING);
 	int r;
 
 	fp_dbg("");
@@ -297,17 +300,8 @@ API_EXPORTED int fp_async_verify_stop(struct fp_dev *dev,
 
 	if (!drv->verify_start)
 		return -ENOTSUP;
-	if (!drv->verify_stop) {
-		dev->state = DEV_STATE_INITIALIZED;
-		fpi_drvcb_verify_stopped(dev);
-		return 0;
-	}
 
-	r = drv->verify_stop(dev, iterating);
-	if (r < 0) {
-		fp_err("failed to stop verification");
-		dev->verify_stop_cb = NULL;
-	}
+    r = fpi_event_push(FP_ASYNC_VERIFY_STOP, dev);
 	return r;
 }
 
@@ -325,12 +319,7 @@ API_EXPORTED int fp_async_identify_start(struct fp_dev *dev,
 	dev->identify_cb_data = user_data;
 	dev->identify_gallery = gallery;
 
-	r = drv->identify_start(dev);
-	if (r < 0) {
-		fp_err("identify_start failed with error %d", r);
-		dev->identify_cb = NULL;
-		dev->state = DEV_STATE_ERROR;
-	}
+    r = fpi_event_push(FP_ASYNC_IDENTIFY_START, dev);
 	return r;
 }
 
@@ -373,7 +362,6 @@ API_EXPORTED int fp_async_identify_stop(struct fp_dev *dev,
 	fp_identify_stop_cb callback, void *user_data)
 {
 	struct fp_driver *drv = dev->drv;
-	gboolean iterating = (dev->state == DEV_STATE_IDENTIFYING);
 	int r;
 
 	fp_dbg("");
@@ -386,19 +374,9 @@ API_EXPORTED int fp_async_identify_stop(struct fp_dev *dev,
 	dev->identify_stop_cb_data = user_data;
 
 	if (!drv->identify_start)
-		return -ENOTSUP;	
-	if (!drv->identify_stop) {
-		dev->state = DEV_STATE_INITIALIZED;
-		fpi_drvcb_identify_stopped(dev);
-		return 0;
-	}
+		return -ENOTSUP;
 
-	r = drv->identify_stop(dev, iterating);
-	if (r < 0) {
-		fp_err("failed to stop identification");
-		dev->identify_stop_cb = NULL;
-	}
-
+    r = fpi_event_push(FP_ASYNC_IDENTIFY_STOP, dev);
 	return r;
 }
 
@@ -427,12 +405,7 @@ API_EXPORTED int fp_async_capture_start(struct fp_dev *dev, int unconditional,
 	dev->capture_cb_data = user_data;
 	dev->unconditional_capture = unconditional;
 
-	r = drv->capture_start(dev);
-	if (r < 0) {
-		dev->capture_cb = NULL;
-		dev->state = DEV_STATE_ERROR;
-		fp_err("failed to start verification, error %d", r);
-	}
+    r = fpi_event_push(FP_ASYNC_CAPTURE_START, dev);
 	return r;
 }
 
@@ -497,16 +470,221 @@ API_EXPORTED int fp_async_capture_stop(struct fp_dev *dev,
 
 	if (!drv->capture_start)
 		return -ENOTSUP;
-	if (!drv->capture_stop) {
-		dev->state = DEV_STATE_INITIALIZED;
-		fpi_drvcb_capture_stopped(dev);
-		return 0;
-	}
 
-	r = drv->capture_stop(dev);
-	if (r < 0) {
-		fp_err("failed to stop verification");
-		dev->capture_stop_cb = NULL;
-	}
+    r = fpi_event_push(FP_ASYNC_CAPTURE_STOP, dev);
 	return r;
+}
+
+
+/* Thread pool
+ *
+ * The main thing is that we do not want to hi-jack the thread of a calling external
+ * program or library. This also makes the libfprint more responsive and reliable.
+ *
+ * Callbacks from libusb should be routed through the threadpool before any significant
+ * work is done.
+ * Async calls to libfprint should be routed here also.
+ * Internal calls might want to use the thread pool to avoid too many recursive calls
+ * and a messed up stack.
+ */
+
+struct fpi_event_data
+{
+    enum fpi_event event;
+    struct fp_dev *dev;
+    gpointer user_data;
+    fpi_event_custom fn;
+};
+
+static void __fpi_thread_pool (gpointer event_data, gpointer user_data)
+{
+    struct fpi_event_data *l_event_data = event_data;
+    enum fpi_event event = l_event_data->event;
+    struct fp_dev *dev = l_event_data->dev;
+    struct fp_driver *drv = NULL;
+    struct fpi_ssm *machine = event_data;
+
+    fp_dbg("%d", event);
+    switch (event)
+    {
+    case FPI_EVENT_CUSTOM:
+        l_event_data->fn(dev, l_event_data->user_data);
+        break;
+
+    case FP_ASYNC_DEV_OPEN:
+        drv = dev->drv;
+        if (!drv->open)
+        {
+            fpi_drvcb_open_complete(dev, 0);
+            break;
+        }
+        int r = drv->open(dev, dev->driver_data);
+        if (r)
+        {
+            fpi_drvcb_open_complete(dev, r);
+            libusb_close(dev->udev);
+            g_free(dev);
+        }
+        break;
+
+    case FP_ASYNC_DEV_CLOSE:
+        drv = dev->drv;
+        if (!drv->close)
+        {
+            fpi_drvcb_close_complete(dev);
+            break;
+        }
+
+        dev->state = DEV_STATE_DEINITIALIZING;
+        drv->close(dev);
+        break;
+
+    case FP_ASYNC_ENROLL_START:
+        drv = dev->drv;
+        r = drv->enroll_start(dev);
+        if (r < 0) {
+            fp_err("failed to start enrollment");
+            dev->state = DEV_STATE_ERROR;
+            fpi_drvcb_enroll_started(dev, r);
+            dev->enroll_stage_cb = NULL;
+        }
+        break;
+
+    case FP_ASYNC_ENROLL_STOP:
+        drv = dev->drv;
+        if (!drv->enroll_stop) {
+            fpi_drvcb_enroll_stopped(dev);
+            break;
+        }
+
+        r = drv->enroll_stop(dev);
+        if (r < 0) {
+            fp_err("failed to stop enrollment");
+            fpi_drvcb_enroll_stopped(dev); // TODO: The callback is not aware of failure
+            dev->enroll_stop_cb = NULL;
+        }
+        break;
+
+    case FP_ASYNC_VERIFY_START:
+        drv = dev->drv;
+        r = drv->verify_start(dev);
+        if (r < 0) {
+            fp_err("failed to start verification, error %d", r);
+            dev->state = DEV_STATE_ERROR;
+            fpi_drvcb_verify_started(dev, r);
+            dev->verify_cb = NULL;
+        }
+        break;
+
+    case FP_ASYNC_VERIFY_STOP:
+        drv = dev->drv;
+        if (!drv->verify_stop) {
+            dev->state = DEV_STATE_INITIALIZED;
+            fpi_drvcb_verify_stopped(dev);
+            break;
+        }
+
+        r = drv->verify_stop(dev, (dev->state == DEV_STATE_VERIFYING));
+        if (r < 0) {
+            fp_err("failed to stop verification");
+            fpi_drvcb_verify_stopped(dev); // TODO: The callback is not aware of failure
+            dev->verify_stop_cb = NULL;
+        }
+        break;
+
+    case FP_ASYNC_IDENTIFY_START:
+        drv = dev->drv;
+        r = drv->identify_start(dev);
+        if (r < 0) {
+            fp_err("identify_start failed with error %d", r);
+            dev->state = DEV_STATE_ERROR;
+            fpi_drvcb_identify_started(dev, r);
+            dev->identify_cb = NULL;
+        }
+        break;
+
+    case FP_ASYNC_IDENTIFY_STOP:
+        drv = dev->drv;
+        if (!drv->identify_stop) {
+            dev->state = DEV_STATE_INITIALIZED;
+            fpi_drvcb_identify_stopped(dev);
+            break;
+        }
+
+        r = drv->identify_stop(dev, (dev->state == DEV_STATE_VERIFYING));
+        if (r < 0) {
+            fp_err("failed to stop identification");
+            fpi_drvcb_identify_stopped(dev); // TODO: The callback is not aware of failure
+            dev->identify_stop_cb = NULL;
+        }
+        break;
+
+    case FP_ASYNC_CAPTURE_START:
+        drv = dev->drv;
+        r = drv->capture_start(dev);
+        if (r < 0) {
+            dev->state = DEV_STATE_ERROR;
+            fp_err("failed to start verification, error %d", r);
+            fpi_drvcb_capture_started(dev, r);
+            dev->capture_cb = NULL;
+        }
+        break;
+
+    case FP_ASYNC_CAPTURE_STOP:
+        drv = dev->drv;
+        if (!drv->capture_stop) {
+            dev->state = DEV_STATE_INITIALIZED;
+            fpi_drvcb_capture_stopped(dev);
+            break;
+        }
+
+        r = drv->capture_stop(dev);
+        if (r < 0) {
+            fp_err("failed to stop capture");
+            fpi_drvcb_capture_stopped(dev); // TODO: The callback is not aware of failure
+            dev->capture_stop_cb = NULL;
+        }
+        break;
+
+    case FPI_EVENT_SSM_CALL_HANDLER:
+        machine->handler(machine);      // TODO: We have race issues.
+        break;
+
+    case FPI_EVENT_SSM_CALLBACK:
+        machine->callback(machine);
+        break;
+
+    case FPI_EVENT_SSM:
+        break;
+    }
+
+    g_slice_free(struct fpi_event_data, event_data);
+}
+
+static int __fpi_event_push(enum fpi_event event, struct fp_dev *dev, gpointer user_data, fpi_event_custom fn)
+{
+    if (dev->thread_pool == NULL)
+    {
+        dev->thread_pool = g_thread_pool_new(__fpi_thread_pool, NULL, 1, FALSE, NULL);
+        if (dev->thread_pool == 0)
+            return -1;
+    }
+
+    struct fpi_event_data *event_data = g_slice_new(struct fpi_event_data); // TODO: Error handling
+    event_data->event = event;
+    event_data->dev = dev;
+    event_data->user_data = user_data;
+    event_data->fn = fn;
+    g_thread_pool_push(dev->thread_pool, event_data, NULL); // TODO: Error handling.
+    return 0;
+}
+
+// Send task to thread pool
+int fpi_event_push(enum fpi_event event, struct fp_dev *dev)
+{
+    return __fpi_event_push(event, dev, NULL, NULL);
+}
+int fpi_event_push_custom(struct fp_dev *dev, gpointer user_data, fpi_event_custom function)
+{
+    return __fpi_event_push(FPI_EVENT_CUSTOM, dev, user_data, function);
 }

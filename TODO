@@ -1,10 +1,25 @@
 LIBRARY
 =======
-test suite against NFIQ compliance set
-make library optionally asynchronous and maybe thread-safe
-nbis cleanups
-API function to determine if img device supports uncond. capture
-race-free way of saying "save this print but don't overwrite"
+* test suite against NFIQ compliance set
+* make library optionally asynchronous and maybe thread-safe
+* One thread is globally, maybe one thread should be user per device.
+* async callbacks report done before everything actually
+  is done and freed.
+* Make the imgdev support verify-retries and multiple enrolls.
+* Make the library optionally synchronous. sync.c is consuming
+  excessive cpu cycles.
+* nbis cleanups
+* API function to determine if img device supports uncond. capture
+* race-free way of saying "save this print but don't overwrite"
+* Unassigned enum constants in fprint.h might break depending
+  software if not careful while changing fprint.h
+* Might not stop as asked to.
+* Use glib debugging
+* Make a convenient api that ties into glib applications main loop,
+  not necessarily complete, focus on ease of use.
+* Use .h files in a correct way, only expose whats needed.
+  Make some structs opaque.
+* More exhausting error reporting.
 
 NEW DRIVERS
 ===========
@@ -23,6 +38,7 @@ aes4000 gain calibration
 aes4000 resampling
 PPMM parameter to get_minutiae seems to have no effect
 nbis minutiae should be stored in endian-independent format
+* aeslib.c is broken. Using libusb async calls as if they were sync.
 
 PORTABILITY
 ===========

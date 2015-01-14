@@ -24,6 +24,7 @@
 
 #include <glib.h>
 
+#define FP_COMPONENT "img"
 #include "fp_internal.h"
 #include "nbis/include/bozorth.h"
 #include "nbis/include/lfs.h"

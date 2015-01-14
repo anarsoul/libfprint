@@ -2,6 +2,7 @@
  * Validity Sensors, Inc. VFS5011 Fingerprint Reader driver for libfprint
  * Copyright (C) 2013 Arseniy Lartsev <arseniy@chalmers.se>
  *                    AceLan Kao <acelan.kao@canonical.com>
+ * Copyright (C) 2015 Per-Ola Gustavsson <pelle@marsba.se>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,9 +23,12 @@
 #include <errno.h>
 #include <string.h>
 #include <libusb.h>
-#include <fp_internal.h>
+
+#define FP_COMPONENT "vfs5011"
+#include "../fp_internal.h"
 #include "driver_ids.h"
 
+#define __VFS5011_C
 #include "vfs5011_proto.h"
 
 /* =================== sync/async USB transfer sequence ==================== */
@@ -41,6 +45,30 @@ struct usb_action {
 	int size;
 	unsigned char *data;
 	int correct_reply_size;
+};
+
+struct usbexchange_data {
+	int stepcount;
+	struct fp_img_dev *device;
+	struct usb_action *actions;
+	void *receive_buf;
+	int timeout;
+};
+
+struct vfs5011_data {
+	unsigned char *total_buffer;
+	unsigned char *capture_buffer;
+	unsigned char *image_buffer;
+	unsigned char *lastline;
+	unsigned char *rescale_buffer;
+	int lines_captured, lines_recorded, empty_lines;
+	int max_lines_captured, max_lines_recorded;
+	int lines_total, lines_total_allocated;
+	gboolean loop_running;
+	gboolean deactivating;
+	struct usbexchange_data init_sequence;
+	struct fpi_ssm *ssm;
+	int _captures;
 };
 
 #define SEND(ENDPOINT, COMMAND) \
@@ -68,14 +96,6 @@ struct usb_action {
 	.data = EXPECTED, \
 	.correct_reply_size = sizeof(EXPECTED) \
 },
-
-struct usbexchange_data {
-	int stepcount;
-	struct fp_img_dev *device;
-	struct usb_action *actions;
-	void *receive_buf;
-	int timeout;
-};
 
 static void async_send_cb(struct libusb_transfer *transfer)
 {
@@ -105,6 +125,7 @@ static void async_send_cb(struct libusb_transfer *transfer)
 		fpi_ssm_mark_aborted(ssm, -EIO);
 		goto out;
 	}
+
 	if (transfer->length != transfer->actual_length) {
 		/* Data sended mismatch with expected, return protocol error */
 		fp_err("length mismatch, got %d, expected %d",
@@ -166,9 +187,13 @@ static void async_recv_cb(struct libusb_transfer *transfer)
 			fpi_ssm_mark_aborted(ssm, -EIO);
 			goto out;
 		}
-	} else
+			fp_dbg("Happy with %d",
+				transfer->actual_length);
+	} else {
 		fp_dbg("Got %d bytes out of %d", transfer->actual_length,
 		       transfer->length);
+        //ssm->cur_state--;
+	}
 
 	fpi_ssm_next_state(ssm);
 out:
@@ -178,6 +203,12 @@ out:
 static void usbexchange_loop(struct fpi_ssm *ssm)
 {
 	struct usbexchange_data *data = (struct usbexchange_data *)ssm->priv;
+	struct vfs5011_data *dev = (struct vfs5011_data *)data->device->priv;
+	if (dev->deactivating) {
+        fp_dbg("Deactivating");
+        fpi_ssm_mark_completed(ssm);
+        return;
+	}
 	if (ssm->cur_state >= data->stepcount) {
 		fp_err("Bug detected: state %d out of range, only %d steps",
 				ssm->cur_state, data->stepcount);
@@ -238,7 +269,7 @@ static void usbexchange_loop(struct fpi_ssm *ssm)
 }
 
 static void usb_exchange_async(struct fpi_ssm *ssm,
-			       struct usbexchange_data *data)
+			       struct usbexchange_data *data)       // TODO: Why is the callback capture_chunk_callback()?
 {
 	struct fpi_ssm *subsm = fpi_ssm_new(data->device->dev,
 					    usbexchange_loop,
@@ -383,14 +414,14 @@ int vfs5011_rescale_image(unsigned char *image, int input_lines,
 			}
 		}
 		offsets[i/2] = bestmatch - i;
-		fp_dbg("offsets: %llu - %d", start_time, offsets[i/2]);
+		// spamming: fp_dbg("offsets: %llu - %d", start_time, offsets[i/2]);
 	}
 
 	median_filter(offsets, input_lines-1, MEDIAN_FILTER_SIZE);
 
 	fp_dbg("offsets_filtered: %llu", g_get_real_time());
-	for (i = 0; i <= input_lines/2-1; i++)
-		fp_dbg("%d", offsets[i]);
+	/*for (i = 0; i <= input_lines/2-1; i++)
+        fp_dbg("%d", offsets[i]);  Spamming */
 	for (i = 0; i < input_lines-1; i++) {
 		int offset = offsets[i/2];
 		if (offset > 0) {
@@ -424,26 +455,16 @@ enum {
 	MAX_CAPTURE_LINES = 100000,
 };
 
-struct vfs5011_data {
-	unsigned char *total_buffer;
-	unsigned char *capture_buffer;
-	unsigned char *image_buffer;
-	unsigned char *lastline;
-	unsigned char *rescale_buffer;
-	int lines_captured, lines_recorded, empty_lines;
-	int max_lines_captured, max_lines_recorded;
-	int lines_total, lines_total_allocated;
-	gboolean loop_running;
-	gboolean deactivating;
-	struct usbexchange_data init_sequence;
-};
-
 enum {
 	DEV_ACTIVATE_REQUEST_FPRINT,
 	DEV_ACTIVATE_INIT_COMPLETE,
+	DEV_ACTIVATE_AWAIT_FINGER_ON,
+	DEV_ACTIVATE_FINGER_ON,
 	DEV_ACTIVATE_READ_DATA,
 	DEV_ACTIVATE_DATA_COMPLETE,
+	DEV_ACTIVATE_FINGER_OFF,
 	DEV_ACTIVATE_PREPARE_NEXT_CAPTURE,
+	DEV_ACTIVATE_IDLE,
 	DEV_ACTIVATE_NUM_STATES
 };
 
@@ -465,45 +486,55 @@ static void capture_init(struct vfs5011_data *data, int max_captured,
 	data->total_buffer = NULL;
 	data->max_lines_captured = max_captured;
 	data->max_lines_recorded = max_recorded;
+	data->_captures = 0;
 }
 
 static int process_chunk(struct vfs5011_data *data, int transferred)
 {
 	enum {
-		DEVIATION_THRESHOLD = 15*15,
+		DEVIATION_THRESHOLD = 1000,
 		DIFFERENCE_THRESHOLD = 600,
 		STOP_CHECK_LINES = 50
 	};
-
-	fp_dbg("process_chunk: got %d bytes", transferred);
 	int lines_captured = transferred/VFS5011_LINE_SIZE;
+	int lines_recorded = 0;
 	int i;
+	int deviation;
+
+	fp_dbg("got %d bytes / %d lines", transferred, lines_captured);
 
 	for (i = 0; i < lines_captured; i++) {
 		unsigned char *linebuf = data->capture_buffer
 					 + i * VFS5011_LINE_SIZE;
-
-		if (get_deviation(linebuf + 8, VFS5011_IMAGE_WIDTH)
-				< DEVIATION_THRESHOLD) {
+        deviation = get_deviation(linebuf + 8, VFS5011_IMAGE_WIDTH);
+        /*#ifdef ENABLE_DEBUG_LOGGING
+        g_print("%d ", deviation);
+        #endif*/
+		if (deviation < DEVIATION_THRESHOLD) {
 			if (data->lines_captured == 0)
-				continue;
-			else
-				data->empty_lines++;
+                continue;
+            data->empty_lines++;
+
 		} else
 			data->empty_lines = 0;
+
 		if (data->empty_lines >= STOP_CHECK_LINES) {
-			fp_dbg("process_chunk: got %d empty lines, finishing",
+			fp_dbg("got %d empty lines, finishing",
 					data->empty_lines);
 			return 1;
 		}
 
 		data->lines_captured++;
 		if (data->lines_captured > data->max_lines_captured) {
-			fp_dbg("process_chunk: captured %d lines, finishing",
+			fp_dbg("captured %d lines, finishing",
 					data->lines_captured);
 			return 1;
 		}
 
+        if (data->lines_recorded >= data->max_lines_recorded) {
+            BUG_ON(TRUE);
+            return 1;
+        }
 		if ((data->lastline == NULL)
 			|| (get_diff_norm(
 				data->lastline + 8,
@@ -514,13 +545,15 @@ static int process_chunk(struct vfs5011_data *data, int transferred)
 					 * VFS5011_LINE_SIZE;
 			memmove(data->lastline, linebuf, VFS5011_LINE_SIZE);
 			data->lines_recorded++;
+			lines_recorded++;
 			if (data->lines_recorded >= data->max_lines_recorded) {
-				fp_dbg("process_chunk: recorded %d lines, finishing",
+				fp_dbg("recorded %d lines, finishing",
 						data->lines_recorded);
 				return 1;
 			}
 		}
 	}
+    fp_dbg("recorded %d lines", lines_recorded);
 	return 0;
 }
 
@@ -553,20 +586,40 @@ static void chunk_capture_callback(struct libusb_transfer *transfer)
 	struct fp_img_dev *dev = (struct fp_img_dev *)ssm->priv;
 	struct vfs5011_data *data = (struct vfs5011_data *)dev->priv;
 
-	if ((transfer->status == LIBUSB_TRANSFER_COMPLETED) ||
-	    (transfer->status == LIBUSB_TRANSFER_TIMED_OUT)) {
+    BUG_ON(!data->_captures);
+    fp_dbg("Recursive callbacks? %d, Status = %d, Length = %d, Actual length = %d, ", data->_captures, transfer->status, transfer->length, transfer->actual_length);
 
-		if (transfer->actual_length > 0)
-			fpi_imgdev_report_finger_status(dev, TRUE);
-
-		if (process_chunk(data, transfer->actual_length))
+    if ((transfer->status == LIBUSB_TRANSFER_TIMED_OUT)) {
+        fp_dbg("Usb timeout during capture");
+        if ((ssm->cur_state == DEV_ACTIVATE_READ_DATA) ||
+                (ssm->cur_state == DEV_ACTIVATE_AWAIT_FINGER_ON))
 			fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_DATA_COMPLETE);
-		else
-			fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_READ_DATA);
-	} else {
-		fp_err("Failed to capture data");
-		fpi_ssm_mark_aborted(ssm, -1);
-	}
+        else
+            BUG_ON(TRUE);
+    } else
+        if ((transfer->status == LIBUSB_TRANSFER_COMPLETED)) {
+
+            int r = process_chunk(data, transfer->actual_length);
+            fp_dbg("process_chunk result = %d, captured = %d, recorded = %d, empty = %d", r, data->lines_captured, data->lines_recorded, data->empty_lines);
+
+            if (ssm->cur_state == DEV_ACTIVATE_AWAIT_FINGER_ON)
+                if (data->lines_recorded != 0)
+                    fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_FINGER_ON);
+                else {
+                    data->empty_lines = 0;
+                    fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_AWAIT_FINGER_ON);
+                }
+            else
+                if (r == 1)
+                    fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_DATA_COMPLETE);
+                else
+                    fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_READ_DATA);
+
+        } else {
+                fp_err("Failed to capture data, transfer status = %d", transfer->status);
+                fpi_ssm_mark_aborted(ssm, -1);
+            }
+	data->_captures--;
 	libusb_free_transfer(transfer);
 }
 
@@ -576,11 +629,8 @@ static int capture_chunk_async(struct vfs5011_data *data,
 {
 	fp_dbg("capture_chunk_async: capture %d lines, already have %d",
 		nline, data->lines_recorded);
-	enum {
-		DEVIATION_THRESHOLD = 15*15,
-		DIFFERENCE_THRESHOLD = 600,
-		STOP_CHECK_LINES = 50
-	};
+    BUG_ON(data->_captures);
+    data->_captures++;
 
 	struct libusb_transfer *transfer = libusb_alloc_transfer(0);
 	libusb_fill_bulk_transfer(transfer, handle, VFS5011_IN_ENDPOINT_DATA,
@@ -767,7 +817,7 @@ struct usb_action vfs5011_initiate_capture[] = {
 
 	SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_03)
 	RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 64, VFS5011_NORMAL_CONTROL_REPLY)
-	RECV(VFS5011_IN_ENDPOINT_CTRL2, 8)
+	//RECV(VFS5011_IN_ENDPOINT_CTRL2, 8)
 
 	SEND(VFS5011_OUT_ENDPOINT, vfs5011_prepare_04)
 	RECV_CHECK(VFS5011_IN_ENDPOINT_CTRL, 2368, VFS5011_NORMAL_CONTROL_REPLY)
@@ -776,6 +826,8 @@ struct usb_action vfs5011_initiate_capture[] = {
 	 * Windows driver does this and it works
 	 * But in this driver this call never returns...
 	 * RECV(VFS5011_IN_ENDPOINT_CTRL2, 8);
+	 *
+	 * TODO: CTRL2 in an interrupt!
 	 */
 };
 
@@ -792,9 +844,15 @@ static void activate_loop(struct fpi_ssm *ssm)
 
 	fp_dbg("main_loop: state %d", ssm->cur_state);
 
+    if (data->deactivating) {
+        fp_dbg("deactivating, marking completed");
+        fpi_ssm_mark_completed(ssm);
+        return;
+    }
+
 	switch (ssm->cur_state) {
 	case DEV_ACTIVATE_REQUEST_FPRINT:
-		data->init_sequence.stepcount =
+        data->init_sequence.stepcount =
 			array_n_elements(vfs5011_initiate_capture);
 		data->init_sequence.actions = vfs5011_initiate_capture;
 		data->init_sequence.device = dev;
@@ -806,51 +864,56 @@ static void activate_loop(struct fpi_ssm *ssm)
 		break;
 
 	case DEV_ACTIVATE_INIT_COMPLETE:
-		if (data->init_sequence.receive_buf != NULL)
-			g_free(data->init_sequence.receive_buf);
-		data->init_sequence.receive_buf = NULL;
 		capture_init(data, MAX_CAPTURE_LINES, MAXLINES);
-		fpi_imgdev_activate_complete(dev, 0);
-		fpi_ssm_next_state(ssm);
+        if (dev->action_state == IMG_ACQUIRE_STATE_AWAIT_FINGER_ON)
+            fpi_ssm_next_state(ssm);
+        else {
+            //fpi_ssm_idle(ssm);
+            fpi_imgdev_activate_complete(dev, 0);
+        }
 		break;
 
+    case DEV_ACTIVATE_AWAIT_FINGER_ON:
+        r = capture_chunk_async(data, dev->udev, CAPTURE_LINES,
+                    READ_TIMEOUT, ssm);
+        if (r != 0) {
+            fp_err("Failed to capture data");
+            fpi_imgdev_session_error(dev, r);
+            fpi_ssm_mark_aborted(ssm, r);
+        }
+		break;
+
+    case DEV_ACTIVATE_FINGER_ON:
+        //fpi_ssm_idle(ssm);
+        fpi_imgdev_report_finger_status(dev, TRUE);
+        break;
+
 	case DEV_ACTIVATE_READ_DATA:
-		if (data->deactivating) {
-			fp_dbg("deactivating, marking completed");
-			fpi_ssm_mark_completed(ssm);
-		} else {
-			r = capture_chunk_async(data, dev->udev, CAPTURE_LINES,
-						READ_TIMEOUT, ssm);
-			if (r != 0) {
-				fp_err("Failed to capture data");
-				fpi_imgdev_session_error(dev, r);
-				fpi_ssm_mark_aborted(ssm, r);
-			}
-		}
+        r = capture_chunk_async(data, dev->udev, CAPTURE_LINES,
+                    READ_TIMEOUT, ssm);
+        if (r != 0) {
+            fp_err("Failed to capture data");
+            fpi_imgdev_session_error(dev, r);
+            fpi_ssm_mark_aborted(ssm, r);
+        }
 		break;
 
 	case DEV_ACTIVATE_DATA_COMPLETE:
-		timeout = fpi_timeout_add(1, async_sleep_cb, ssm);
+       submit_image(ssm, data);
+		break;
 
-		if (timeout == NULL) {
-			/* Failed to add timeout */
-			fp_err("failed to add timeout");
-			fpi_imgdev_session_error(dev, -1);
-			fpi_ssm_mark_aborted(ssm, -1);
-		}
+    case DEV_ACTIVATE_FINGER_OFF:
+        //fpi_ssm_idle(ssm);
+        fpi_imgdev_report_finger_status(dev, FALSE);
 		break;
 
 	case DEV_ACTIVATE_PREPARE_NEXT_CAPTURE:
-		data->init_sequence.stepcount =
-			array_n_elements(vfs5011_initiate_capture);
-		data->init_sequence.actions = vfs5011_initiate_capture;
-		data->init_sequence.device = dev;
-		if (data->init_sequence.receive_buf == NULL)
-			data->init_sequence.receive_buf =
-				g_malloc0(VFS5011_RECEIVE_BUF_SIZE);
-		data->init_sequence.timeout = VFS5011_DEFAULT_WAIT_TIMEOUT;
-		usb_exchange_async(ssm, &data->init_sequence);
+		fpi_ssm_jump_to_state(ssm, DEV_ACTIVATE_REQUEST_FPRINT);
 		break;
+
+    case DEV_ACTIVATE_IDLE:
+        // Probably never will be used.
+        break;
 
 	}
 }
@@ -866,16 +929,13 @@ static void activate_loop_complete(struct fpi_ssm *ssm)
 		g_free(data->init_sequence.receive_buf);
 	data->init_sequence.receive_buf = NULL;
 	data->loop_running = FALSE;
-	submit_image(ssm, data);
-	fpi_imgdev_report_finger_status(dev, FALSE);
 
 	fpi_ssm_free(ssm);
 
-	if (r)
-		fpi_imgdev_session_error(dev, r);
-
 	if (data->deactivating)
 		fpi_imgdev_deactivate_complete(dev);
+	else if (r)
+		fpi_imgdev_session_error(dev, r);
 }
 
 static void open_loop(struct fpi_ssm *ssm)
@@ -905,6 +965,7 @@ static void open_loop_complete(struct fpi_ssm *ssm)
 	g_free(data->init_sequence.receive_buf);
 	data->init_sequence.receive_buf = NULL;
 
+	fp_dbg("device initialized");
 	fpi_imgdev_open_complete(dev, 0);
 	fpi_ssm_free(ssm);
 }
@@ -923,8 +984,6 @@ static int dev_open(struct fp_img_dev *dev, unsigned long driver_data)
 	data->rescale_buffer =
 		(unsigned char *)g_malloc0(MAXLINES * VFS5011_IMAGE_WIDTH);
 	dev->priv = data;
-
-	dev->dev->nr_enroll_stages = 1;
 
 	r = libusb_reset_device(dev->udev);
 	if (r != 0) {
@@ -948,6 +1007,7 @@ static int dev_open(struct fp_img_dev *dev, unsigned long driver_data)
 
 static void dev_close(struct fp_img_dev *dev)
 {
+    fp_dbg("");
 	libusb_release_interface(dev->udev, 0);
 	struct vfs5011_data *data = (struct vfs5011_data *)dev->priv;
 	if (data != NULL) {
@@ -964,16 +1024,14 @@ static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
 	struct vfs5011_data *data = (struct vfs5011_data *)dev->priv;
 	struct fpi_ssm *ssm;
 
-	fp_dbg("device initialized");
 	data->deactivating = FALSE;
 	data->loop_running = TRUE;
 
-	fp_dbg("creating ssm");
 	ssm = fpi_ssm_new(dev->dev, activate_loop, DEV_ACTIVATE_NUM_STATES);
 	ssm->priv = dev;
+	data->ssm = ssm;
 	fp_dbg("starting ssm");
 	fpi_ssm_start(ssm, activate_loop_complete);
-	fp_dbg("ssm done, getting out");
 
 	return 0;
 }
@@ -982,9 +1040,72 @@ static void dev_deactivate(struct fp_img_dev *dev)
 {
 	struct vfs5011_data *data = dev->priv;
 	if (data->loop_running)
-		data->deactivating = TRUE;
+    {
+		data->deactivating = TRUE;      // TODO: This might cause minor race issues.
+        //fpi_ssm_async_complete(data->ssm);
+		//fpi_ssm_jump_to_state(data->ssm, DEV_ACTIVATE_DEACTIVATE); // TODO: Raise priority.
+    }
 	else
 		fpi_imgdev_deactivate_complete(dev);
+}
+
+static int dev_change_state(struct fp_img_dev *dev, enum fp_imgdev_state state)
+{
+	struct vfs5011_data *data = (struct vfs5011_data *)dev->priv;
+	int cur_state = fpi_ssm_get_current_state(data->ssm);
+	fp_dbg("State = %d", state);
+	switch (state)
+	{
+	case IMGDEV_STATE_INACTIVE:
+	    if (cur_state == DEV_ACTIVATE_FINGER_OFF ||
+            cur_state == DEV_ACTIVATE_FINGER_OFF ||
+            cur_state == DEV_ACTIVATE_INIT_COMPLETE ||
+            cur_state == DEV_ACTIVATE_DATA_COMPLETE ||
+            cur_state == DEV_ACTIVATE_IDLE
+        ) {
+            fpi_ssm_jump_to_state(data->ssm, DEV_ACTIVATE_IDLE);
+            fp_dbg("Inactive");
+            break;
+	    }
+        fp_err("Device is busy");
+        return -1;
+
+	case IMGDEV_STATE_AWAIT_FINGER_ON:
+	    if (cur_state == DEV_ACTIVATE_REQUEST_FPRINT) {
+            fp_dbg("Device is initializing, will continue");
+            break;
+	    }
+	    if (cur_state == DEV_ACTIVATE_FINGER_OFF) {
+            fp_dbg("Device is initializing, will continue");
+            fpi_ssm_jump_to_state(data->ssm, DEV_ACTIVATE_REQUEST_FPRINT);
+            break;
+	    }
+	    if (cur_state == DEV_ACTIVATE_INIT_COMPLETE) {
+            fpi_ssm_next_state(data->ssm);
+            break;
+	    }
+        fp_err("Device not initialized");
+        return -1;
+
+	case IMGDEV_STATE_CAPTURE:
+	    if (cur_state == DEV_ACTIVATE_FINGER_ON) {
+            fpi_ssm_next_state(data->ssm);
+            break;
+	    }
+        fp_err("Device not ready for capture");
+        return -1;
+
+	case IMGDEV_STATE_AWAIT_FINGER_OFF:
+	    if (cur_state == DEV_ACTIVATE_DATA_COMPLETE) {
+            fpi_ssm_next_state(data->ssm);
+            break;
+	    }
+        fp_err("Device has not read data");
+        return -1;
+	}
+
+	return 0;
+
 }
 
 static const struct usb_id id_table[] = {
@@ -1012,5 +1133,6 @@ struct fp_img_driver vfs5011_driver = {
 	.close = dev_close,
 	.activate = dev_activate,
 	.deactivate = dev_deactivate,
+	.change_state = dev_change_state,
 };
 

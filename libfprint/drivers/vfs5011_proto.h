@@ -1,3 +1,4 @@
+#ifdef __VFS5011_C         //Don't include
 #ifndef __VFS5011_PROTO_H
 #define __VFS5011_PROTO_H
 
@@ -10,7 +11,7 @@ enum {
 	VFS5011_OUT_ENDPOINT = 1 | LIBUSB_ENDPOINT_OUT,
 	VFS5011_IN_ENDPOINT_CTRL = 1 | LIBUSB_ENDPOINT_IN,
 	VFS5011_IN_ENDPOINT_DATA = 2 | LIBUSB_ENDPOINT_IN,
-	VFS5011_IN_ENDPOINT_CTRL2 = 3 | LIBUSB_ENDPOINT_IN,
+	VFS5011_IN_ENDPOINT_CTRL2 = 3 | LIBUSB_ENDPOINT_IN, //Interrupt
 };
 
 enum {
@@ -6184,3 +6185,4 @@ static unsigned char vfs5011_prepare_04[] = { /* 2903 B */
 };
 
 #endif
+#endif // __VFS5011_C
