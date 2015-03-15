@@ -236,6 +236,8 @@ typedef struct lfsparms{
    int    pores_steps_bwd;
    double pores_min_dist2;
    double pores_max_ratio;
+   int    remove_perimeter_pts;
+   int    min_pp_distance;
 
    /* Ridge Counting Controls */
    int    max_nbrs;
@@ -585,6 +587,9 @@ typedef struct lfsparms{
 /* contour points to be considered a pore.                               */
 #define PORES_MAX_RATIO          2.25
 
+/* Points which are closer than this distance to scan perimeter will be removed */
+#define PERIMETER_PTS_DISTANCE 10
+
 
 /***** RIDGE COUNTING CONSTANTS *****/
 
@@ -727,6 +732,9 @@ extern void contour_limits(int *, int *, int *, int *, const int *,
                      const int *, const int);
 extern void fix_edge_pixel_pair(int *, int *, int *, int *,
                      unsigned char *, const int, const int);
+
+/* convexhull.c */
+extern int ch2d(MINUTIA **P, int n);
 
 /* detect.c */
 extern int get_minutiae(MINUTIAE **, int **, int **, int **,
