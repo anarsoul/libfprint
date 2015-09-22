@@ -78,6 +78,8 @@ static struct fpi_frame_asmbl_ctx assembling_ctx = {
 	.frame_width = FRAME_WIDTH,
 	.frame_height = FRAME_HEIGHT,
 	.image_width = IMAGE_WIDTH,
+	.x_search_left = -8,
+	.x_search_right = 8,
 	.get_pixel = aes_get_pixel,
 };
 

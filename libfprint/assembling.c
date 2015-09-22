@@ -96,7 +96,7 @@ static void find_overlap(struct fpi_frame_asmbl_ctx *ctx,
 	 * rarely less than 2, so start with it.
 	 */
 	for (dy = 2; dy < ctx->frame_height; dy++) {
-		for (dx = -8; dx < 8; dx++) {
+		for (dx = ctx->x_search_left; dx < ctx->x_search_right; dx++) {
 			err = calc_error(ctx, first_frame, second_frame,
 				dx, dy);
 			if (err < *min_error) {

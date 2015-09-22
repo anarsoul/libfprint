@@ -34,6 +34,8 @@ struct fpi_frame_asmbl_ctx {
 	unsigned frame_width;
 	unsigned frame_height;
 	unsigned image_width;
+	int x_search_left;
+	int x_search_right;
 	unsigned char (*get_pixel)(struct fpi_frame_asmbl_ctx *ctx,
 				   struct fpi_frame *frame,
 				   unsigned x,
