@@ -353,47 +353,48 @@ struct fp_img *fpi_assemble_lines(struct fpi_line_asmbl_ctx *ctx,
 	GSList *row1, *row2;
 	float y = 0.0;
 	int line_ind = 0;
-	int *offsets = (int *)g_malloc0((lines_len / 2) * sizeof(int));
+	int *offsets = (int *)g_malloc0(lines_len * sizeof(int));
 	unsigned char *output = g_malloc0(ctx->line_width * ctx->max_height);
 	struct fp_img *img;
 
-	fp_dbg("%llu", g_get_real_time());
+	fp_dbg("time: %llu", g_get_real_time());
 
 	row1 = lines;
-	for (i = 0; (i < lines_len - 1) && row1; i += 2) {
+	for (i = 0; (i < lines_len - 1) && row1; i++)  {
 		int bestmatch = i;
 		int bestdiff = 0;
-		int j, firstrow, lastrow;
+		int j, dx, firstrow, lastrow, best_dx = -10;
 
 		firstrow = i + 1;
 		lastrow = min(i + ctx->max_search_offset, lines_len - 1);
 
 		row2 = g_slist_next(row1);
 		for (j = firstrow; j <= lastrow; j++) {
-			int diff = ctx->get_deviation(ctx,
-					row1,
-					row2);
-			if ((j == firstrow) || (diff < bestdiff)) {
-				bestdiff = diff;
-				bestmatch = j;
+			for (dx = -5; dx <= 5; dx++) {
+				int diff = ctx->get_deviation(ctx, dx,
+						row1,
+						row2);
+				if ((j == firstrow) || (diff < bestdiff)) {
+					bestdiff = diff;
+					bestmatch = j;
+					best_dx = dx;
+				}
 			}
 			row2 = g_slist_next(row2);
 		}
-		offsets[i / 2] = bestmatch - i;
-		fp_dbg("%d", offsets[i / 2]);
+		offsets[i] = bestmatch - i;
+		fp_dbg("%d - %d, dx: %d", i, offsets[i], best_dx);
 		row1 = g_slist_next(row1);
-		if (row1)
-			row1 = g_slist_next(row1);
 	}
 
-	median_filter(offsets, (lines_len / 2) - 1, ctx->median_filter_size);
+	median_filter(offsets, lines_len - 1, ctx->median_filter_size);
 
 	fp_dbg("offsets_filtered: %llu", g_get_real_time());
-	for (i = 0; i <= (lines_len / 2) - 1; i++)
+	for (i = 0; i <= (lines_len - 1); i++)
 		fp_dbg("%d", offsets[i]);
 	row1 = lines;
 	for (i = 0; i < lines_len - 1; i++, row1 = g_slist_next(row1)) {
-		int offset = offsets[i/2];
+		int offset = offsets[i];
 		if (offset > 0) {
 			float ynext = y + (float)ctx->resolution / offset;
 			while (line_ind < ynext) {

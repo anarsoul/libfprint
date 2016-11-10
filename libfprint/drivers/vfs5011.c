@@ -253,13 +253,19 @@ static void usb_exchange_async(struct fpi_ssm *ssm,
 /* ====================== utils ======================= */
 
 /* Calculade squared standand deviation of sum of two lines */
-static int vfs5011_get_deviation2(struct fpi_line_asmbl_ctx *ctx, GSList *row1, GSList *row2)
+static int vfs5011_get_deviation2(struct fpi_line_asmbl_ctx *ctx, int dx,
+				  GSList *row1, GSList *row2)
 {
 	unsigned char *buf1, *buf2;
 	int res = 0, mean = 0, i;
 	const int size = 64;
 
-	buf1 = row1->data + 56;
+	if (dx < -7)
+		dx = -7;
+	if (dx > 7)
+		dx = 7;
+
+	buf1 = row1->data + 56 + dx;
 	buf2 = row2->data + 168;
 
 	for (i = 0; i < size; i++)
@@ -296,7 +302,7 @@ static struct fpi_line_asmbl_ctx assembling_ctx = {
 	.line_width = VFS5011_IMAGE_WIDTH,
 	.max_height = MAXLINES,
 	.resolution = 10,
-	.median_filter_size = 25,
+	.median_filter_size = 15,
 	.max_search_offset = 30,
 	.get_deviation = vfs5011_get_deviation2,
 	.get_pixel = vfs5011_get_pixel,

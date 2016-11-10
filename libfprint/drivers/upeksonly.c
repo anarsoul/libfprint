@@ -117,7 +117,7 @@ struct sonly_dev {
 
 
 /* Calculade squared standand deviation of sum of two lines */
-static int upeksonly_get_deviation2(struct fpi_line_asmbl_ctx *ctx,
+static int upeksonly_get_deviation2(struct fpi_line_asmbl_ctx *ctx, int dx,
 			  GSList *line1, GSList *line2)
 {
 	unsigned char *buf1 = line1->data, *buf2 = line2->data;

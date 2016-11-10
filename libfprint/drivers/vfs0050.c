@@ -189,7 +189,7 @@ static unsigned char vfs0050_get_pixel(struct fpi_line_asmbl_ctx *ctx,
 }
 
 /* Deviation getter for fpi_assemble_lines */
-static int vfs0050_get_difference(struct fpi_line_asmbl_ctx *ctx,
+static int vfs0050_get_difference(struct fpi_line_asmbl_ctx *ctx, int dx,
 				  GSList * line_list_1, GSList * line_list_2)
 {
 	struct vfs_line *line1 = line_list_1->data;

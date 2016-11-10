@@ -52,7 +52,7 @@ struct fpi_line_asmbl_ctx {
 	unsigned resolution;
 	unsigned median_filter_size;
 	unsigned max_search_offset;
-	int (*get_deviation)(struct fpi_line_asmbl_ctx *ctx,
+	int (*get_deviation)(struct fpi_line_asmbl_ctx *ctx, int dx,
 			     GSList *line1, GSList *line2);
 	unsigned char (*get_pixel)(struct fpi_line_asmbl_ctx *ctx,
 				   GSList *line,
